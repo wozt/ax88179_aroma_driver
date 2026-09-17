@@ -48,6 +48,7 @@ static int initialized, active, link_errors, last_link_up, netif_in_list;
 static int session_lease_mode = 1;
 static int session_lease_valid;
 static uint32_t session_ip, session_netmask, session_gateway;
+static int current_using_cached_lease;
 /* Counters for the bring-up heartbeat: when DHCP does not complete, the
  * question is always the same -- are frames leaving, are frames coming
  * back, and does the driver report an error on either side. */
@@ -179,6 +180,7 @@ int ax_net_start(Ax88179 *ax)
         initialized = 1;
     }
     struct setup_ctx ctx = { .ax=ax, .link_up=0, .restore_lease=session_lease_mode && session_lease_valid, .err=ERR_ARG };
+    current_using_cached_lease = ctx.restore_lease;
     int speed;
     if (ax88179_link(ax, &speed) == 1) ctx.link_up = 1;
     LOCK_TCPIP_CORE();
@@ -367,6 +369,11 @@ void ax_net_set_session_lease_mode(int enabled)
 int ax_net_stack_ready(void)
 {
     return initialized;
+}
+
+int ax_net_using_cached_lease(void)
+{
+    return current_using_cached_lease;
 }
 
 /* Our IPv4 address in network byte order, 0 when none. */

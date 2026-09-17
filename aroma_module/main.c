@@ -235,7 +235,10 @@ static int run_network(int argc, const char **argv)
         if (ip && ip[0]) {
             dhcp_done = 1;
             ax_mark(AX_MARK_DHCP_BOUND);
-            AX_LOG("DHCP BOUND %s", ip);
+            if (ax_net_using_cached_lease())
+                AX_LOG("CACHED LEASE RESTORED %s", ip);
+            else
+                AX_LOG("DHCP BOUND %s", ip);
         }
         if (OSGetTime() >= dhcp_deadline) break;
         OSSleepTicks(OSMillisecondsToTicks(100));

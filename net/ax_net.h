@@ -22,4 +22,6 @@ int ax_net_stack_ready(void);
 /* Our IPv4 address, network byte order, 0 when down. */
 uint32_t ax_net_ip4(void);
 void ax_net_set_session_lease_mode(int enabled);
+/* Non-zero when the current start restored the session DHCP lease. */
+int ax_net_using_cached_lease(void);
 #endif
