@@ -45,6 +45,9 @@ static atomic_int tx_in_use[TX_SLOTS];
 static OSMessageQueue tx_queue;
 static OSMessage tx_storage[TX_SLOTS];
 static int initialized, active, link_errors, last_link_up, netif_in_list;
+static int session_lease_mode = 1;
+static int session_lease_valid;
+static uint32_t session_ip, session_netmask, session_gateway;
 /* Counters for the bring-up heartbeat: when DHCP does not complete, the
  * question is always the same -- are frames leaving, are frames coming
  * back, and does the driver report an error on either side. */
@@ -116,6 +119,7 @@ static err_t init_interface(struct netif *n)
 struct setup_ctx {
     Ax88179 *ax;
     int link_up;
+    int restore_lease;
     err_t err;
 };
 
@@ -146,14 +150,18 @@ static void setup_netif(struct setup_ctx *c)
     netif_set_default(&iface);
     netif_set_up(&iface);
     if (c->link_up) netif_set_link_up(&iface);
-    if (dhcp_start(&iface) != ERR_OK) {
+    if (c->restore_lease) {
+        ip4_addr_t ip={.addr=session_ip}, mask={.addr=session_netmask};
+        ip4_addr_t gw={.addr=session_gateway};
+        netif_set_addr(&iface, &ip, &mask, &gw);
+    } else if (dhcp_start(&iface) != ERR_OK) {
         dhcp_cleanup(&iface);
         netif_remove(&iface);
         netif_in_list = 0;
         c->err = ERR_IF;
         return;
     }
-    ax_mark(AX_MARK_DHCP_STARTED);
+    if (!c->restore_lease) ax_mark(AX_MARK_DHCP_STARTED);
     sys_timeout(500, beat_cb, NULL);
     c->err = ERR_OK;
 }
@@ -170,7 +178,7 @@ int ax_net_start(Ax88179 *ax)
         ax_mark(AX_MARK_TCPIP_INIT);
         initialized = 1;
     }
-    struct setup_ctx ctx = { .ax = ax, .link_up = 0, .err = ERR_ARG };
+    struct setup_ctx ctx = { .ax=ax, .link_up=0, .restore_lease=session_lease_mode && session_lease_valid, .err=ERR_ARG };
     int speed;
     if (ax88179_link(ax, &speed) == 1) ctx.link_up = 1;
     LOCK_TCPIP_CORE();
@@ -270,8 +278,17 @@ int ax_net_poll(void)
 
 const char *ax_net_address(void)
 {
-    if (!active || !netif_is_link_up(&iface) || !dhcp_supplied_address(&iface)) return NULL;
-    return ip4addr_ntoa_r(netif_ip4_addr(&iface), address, sizeof(address));
+    if (!active || !netif_is_link_up(&iface)) return NULL;
+    const ip4_addr_t *ip=netif_ip4_addr(&iface);
+    if (!ip || !ip->addr) return NULL;
+    if (session_lease_mode && !session_lease_valid &&
+        dhcp_supplied_address(&iface)) {
+        session_ip=ip->addr;
+        session_netmask=netif_ip4_netmask(&iface)->addr;
+        session_gateway=netif_ip4_gw(&iface)->addr;
+        session_lease_valid=1;
+    }
+    return ip4addr_ntoa_r(ip,address,sizeof(address));
 }
 
 /*
@@ -341,6 +358,12 @@ void ax_net_forget(void)
 }
 
 /* Non-zero once tcpip_init has run: the socket/DNS API is usable. */
+void ax_net_set_session_lease_mode(int enabled)
+{
+    session_lease_mode = enabled;
+    if (!enabled) session_lease_valid = 0;
+}
+
 int ax_net_stack_ready(void)
 {
     return initialized;
@@ -355,8 +378,11 @@ uint32_t ax_net_ip4(void)
 
 static void stop_netif(void)
 {
-    dhcp_release_and_stop(&iface);
-    dhcp_cleanup(&iface);
+    if (netif_dhcp_data(&iface)) {
+        if (session_lease_mode && session_lease_valid) dhcp_stop(&iface);
+        else dhcp_release_and_stop(&iface);
+        dhcp_cleanup(&iface);
+    }
     netif_set_down(&iface);
     netif_remove(&iface);
     netif_in_list = 0;

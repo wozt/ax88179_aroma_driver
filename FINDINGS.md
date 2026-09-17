@@ -2,6 +2,23 @@
 
 Date: 2026-09-17
 
+### Session DHCP lease caching
+
+Repeated DHCP negotiation after every title transition was unnecessary and added noticeable network bring-up time.
+
+A session-level DHCP lease cache was therefore implemented. In `keep_first` mode, the first successful DHCP negotiation is performed normally and the resulting IPv4 configuration (address, netmask, and gateway) is retained in the resident Aroma module. When the network worker is recreated after a title transition, lwIP is still rebuilt from scratch, but the cached network configuration is restored instead of starting another DHCP negotiation.
+
+This preserves the required stop/restart lifecycle of the network worker while making network availability after title transitions significantly faster.
+
+Two DHCP modes are available through `SD:/wiiu/ax88179/config.ini`:
+
+* `keep_first` — keep and reuse the first successful DHCP configuration for the current Aroma session.
+* `always` — perform a new DHCP negotiation after every title transition.
+
+The cached lease is RAM-only and is lost on a full console reboot, so a fresh DHCP negotiation is still performed when starting a new Aroma session.
+
+**Result:** `keep_first` was successfully tested and the Ethernet interface recovers its IP substantially faster after title transitions.
+
 ## SHIM VALIDATED — TCP+UDP through the adapter (2026-09-17)
 
 The `test_shim_boot` test now waits for the IP address **locally** (`socket()` probe: native fallback is identified by `errno=-1`, then `SO_MYADDR` must be non-zero — lwIP returns `0.0.0.0` until DHCP has completed), instead of performing a UDP round trip to the PC, which depended on the echo server.

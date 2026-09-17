@@ -21,4 +21,5 @@ int ax_display_check_exit(void);
 int ax_net_stack_ready(void);
 /* Our IPv4 address, network byte order, 0 when down. */
 uint32_t ax_net_ip4(void);
+void ax_net_set_session_lease_mode(int enabled);
 #endif

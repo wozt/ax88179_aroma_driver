@@ -27,6 +27,10 @@ The project provides a native AX88179 USB driver, a dedicated **lwIP network sta
 * [x] UDP
 * [x] Experimental `nsysnet` socket interception
 * [x] TCP/UDP traffic from a Wii U homebrew routed through the AX88179 interface
+* [x]Configurable DHCP behavior through `SD:/wiiu/ax88179/config.ini`.
+* [x]Optional session-level DHCP lease caching for faster network recovery after title transitions.
+* [x]Network worker stop/restart across title transitions while retaining the first successful DHCP configuration for the current Aroma session.
+
 
 ### Experimental / incomplete
 
@@ -196,6 +200,30 @@ Then reboot the Wii U into Aroma.
 The module is loaded automatically by the environment; no application needs to be launched manually.
 
 When socket interception is enabled, Aroma's **FunctionPatcher module** must also be installed.
+
+---
+
+## Configuration
+
+The module configuration file is located at:
+
+```text
+SD:/wiiu/ax88179/config.ini
+```
+
+DHCP behavior can be configured with:
+
+```ini
+[dhcp]
+mode=keep_first
+```
+
+Available modes:
+
+* `keep_first` — perform DHCP once, then reuse the first successful IPv4 configuration across title transitions for the remainder of the Aroma session.
+* `always` — perform a new DHCP negotiation after every title transition.
+
+`keep_first` only caches the configuration in RAM. A full console reboot clears it and causes DHCP to run normally again.
 
 ---
 
