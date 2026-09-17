@@ -143,6 +143,10 @@ static unsigned phy_init_generation;
 static int debug_last_link = -1;
 static OSTime debug_link_start;
 
+#define PHY_LOG(fmt, ...) \
+    WHBLogPrintf("[%llu] PHY: " fmt, \
+        (unsigned long long)OSTicksToMilliseconds(OSGetTime()), ##__VA_ARGS__)
+
 /* The chip speaks little-endian and this console does not. */
 static uint32_t le32(const uint8_t *p)
 {
@@ -336,21 +340,21 @@ Ax88179 *ax88179_open(char *why, unsigned why_size)
             ax88179_read_phy(ax, 1, &warm_bmsr) != 0 ||
             warm_bmcr == 0xffff || warm_bmcr == 0x0000 ||
             warm_bmsr == 0xffff || warm_bmsr == 0x0000) {
-            WHBLogPrintf("AX88179 PHY: warm validation FAILED, falling back to cold");
+            PHY_LOG("warm invalid -> cold");
             warm_phy = 0;
         } else {
-            WHBLogPrintf("AX88179 PHY: warm validation OK BMCR=%04x BMSR=%04x",
+            PHY_LOG("warm ok bmcr=%04x bmsr=%04x",
                          warm_bmcr, warm_bmsr);
         }
     }
 
     if (!warm_phy) {
-        WHBLogPrintf("AX88179 PHY: cold power reset");
+        PHY_LOG("cold reset");
         CHECK(mac_write16(ax, AX_PHYPWR_RSTCTL, 0));
         CHECK(mac_write16(ax, AX_PHYPWR_RSTCTL, AX_PHYPWR_RSTCTL_IPRL));
         sleep_ms(500);
     } else {
-        WHBLogPrintf("AX88179 PHY: warm reopen, skipping power reset");
+        PHY_LOG("warm reopen");
     }
     stage = "clock select";
     CHECK(mac_write8(ax, AX_CLK_SELECT, 3));
@@ -386,7 +390,7 @@ Ax88179 *ax88179_open(char *why, unsigned why_size)
     CHECK(phy_write(ax, 0, new_bmcr));
     debug_link_start = OSGetTime();
     debug_last_link = -1;
-    WHBLogPrintf("AX88179 PHY: autoneg %s (generation %u, BMCR %04x -> %04x)",
+    PHY_LOG("autoneg %s (generation %u, BMCR %04x -> %04x)",
                  warm_phy ? "KEEP" : "RESTART",
                  phy_init_generation, bmcr, new_bmcr);
     phy_init_generation++;
@@ -453,7 +457,7 @@ int ax88179_link(Ax88179 *ax, int *speed)
     int debug_up = ((bmsr & 4) && (bmsr & 0x20) && (status & 0x400));
     if (debug_up != debug_last_link) {
         uint64_t elapsed = OSTicksToMilliseconds(OSGetTime() - debug_link_start);
-        WHBLogPrintf("AX88179 PHY: link=%s after %llu ms BMSR=%04x STATUS=%04x",
+        PHY_LOG("link=%s after %llu ms BMSR=%04x STATUS=%04x",
                      debug_up ? "UP" : "DOWN",
                      (unsigned long long)elapsed,
                      bmsr, status);

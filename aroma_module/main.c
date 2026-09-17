@@ -13,7 +13,7 @@
 #include "debug_progress.h"
 
 #define AX_LOG(fmt, ...) \
-    WHBLogPrintf("AX88179 module [%llu ms]: " fmt, \
+    WHBLogPrintf("[%llu] AX: " fmt, \
                  (unsigned long long)OSTicksToMilliseconds(OSGetTime()), ##__VA_ARGS__)
 
 #ifndef AX_DISABLE_SHIM
@@ -135,9 +135,6 @@ static int run_network(int argc, const char **argv)
     ax_mark(AX_MARK_WORKER_STARTED);
     WHBLogUdpInit();
     ax_mark(AX_MARK_UDP_LOG);
-    AX_LOG("worker started v0.2.7-restart-wait-test (SHIM %s, RX sync 5000us)",
-                 AX_DISABLE_SHIM ? "OFF" : "ON");
-
     /* RPXLoader/wiiload starts a short-lived title to receive the payload.
      * Touching UHS during that transfer can strand the worker in teardown.
      * Let short-lived loader titles exit before opening the adapter. */
@@ -155,9 +152,9 @@ static int run_network(int argc, const char **argv)
 
     const unsigned startup_delay_ms = (generation == 0) ? 25000 : 2000;
 
-    AX_LOG("startup guard %u ms (%s)",
-           startup_delay_ms,
-           generation == 0 ? "initial boot" : "title transition");
+    AX_LOG("start guard=%ums gen=%u %s",
+           startup_delay_ms, generation,
+           AX_DISABLE_SHIM ? "shim=off" : "shim=on");
 
     for (unsigned waited = 0; waited < startup_delay_ms; waited += 100) {
         if (atomic_load_explicit(&stopping, memory_order_acquire))
@@ -166,15 +163,12 @@ static int run_network(int argc, const char **argv)
         OSSleepTicks(OSMillisecondsToTicks(100));
     }
 
-    AX_LOG("startup guard finished, beginning bring-up");
-
     /* A fresh process: nothing lwIP left behind is still valid. */
     nsysnet_shim_set_trace_level(config_shim_trace);
-    AX_LOG("shim trace level: %d", config_shim_trace);
-
     ax_net_set_session_lease_mode(config_keep_first);
-    AX_LOG("DHCP mode: %s",
-           config_keep_first ? "keep_first" : "always");
+    AX_LOG("config dhcp=%s trace=%d",
+           config_keep_first ? "keep_first" : "always",
+           config_shim_trace);
 
     ax_net_forget();
 
@@ -206,9 +200,8 @@ static int run_network(int argc, const char **argv)
     Ax88179 *ax = NULL;
     char why[160];
     OSTime t_open = OSGetTime();
-    AX_LOG("TIMING: ax88179_open begin");
     ax = ax88179_open(why, sizeof(why));
-    AX_LOG("TIMING: ax88179_open end: %llu ms",
+    AX_LOG("open %llums",
            (unsigned long long)OSTicksToMilliseconds(OSGetTime() - t_open));
     if (!ax) {
         AX_LOG("%s", why);
@@ -218,13 +211,12 @@ static int run_network(int argc, const char **argv)
 
     /* Initialize lwIP */
     OSTime t_net = OSGetTime();
-    AX_LOG("TIMING: ax_net_start begin");
     if (ax_net_start(ax) != 0) {
         AX_LOG("network initialization failed");
         ax88179_close(ax);
         goto cleanup;
     }
-    AX_LOG("TIMING: ax_net_start end: %llu ms",
+    AX_LOG("net %llums",
            (unsigned long long)OSTicksToMilliseconds(OSGetTime() - t_net));
     ax_mark(AX_MARK_NET_STARTED);
 
@@ -244,9 +236,9 @@ static int run_network(int argc, const char **argv)
             dhcp_done = 1;
             ax_mark(AX_MARK_DHCP_BOUND);
             if (ax_net_using_cached_lease())
-                AX_LOG("CACHED LEASE RESTORED %s", ip);
+                AX_LOG("lease cached %s", ip);
             else
-                AX_LOG("DHCP BOUND %s", ip);
+                AX_LOG("lease DHCP %s", ip);
         }
         if (OSGetTime() >= dhcp_deadline) break;
         OSSleepTicks(OSMillisecondsToTicks(100));
@@ -263,7 +255,7 @@ static int run_network(int argc, const char **argv)
 #if !AX_DISABLE_SHIM
     if (nsysnet_shim_install() == 0) {
         ax_mark(AX_MARK_SHIM_INSTALLED);
-        AX_LOG("%d nsysnet hooks installed", handle_count);
+        AX_LOG("shim ready hooks=%d", handle_count);
     } else {
         AX_LOG("FAILED to install shim hooks");
     }
@@ -283,12 +275,12 @@ static int run_network(int argc, const char **argv)
         /* Log IP changes and status */
         if (ip && strcmp(ip, previous_ip)) {
             strncpy(previous_ip, ip, sizeof(previous_ip) - 1);
-            AX_LOG("IP active: %s", ip);
+            AX_LOG("ready %s", ip);
             ax_mark(AX_MARK_DHCP_BOUND);
             /* Reopen UDP log on the adapter now */
             WHBLogUdpDeinit();
             if (WHBLogUdpInit())
-                AX_LOG("UDP logger reopened on AX IP %s", ip);
+                AX_LOG("udp-log %s", ip);
         } else if (!ip && previous_ip[0]) {
             previous_ip[0] = 0;
             AX_LOG("link/lease unavailable");
@@ -318,7 +310,6 @@ static int run_network(int argc, const char **argv)
     /* Cleanup */
 #if !AX_DISABLE_SHIM
     nsysnet_shim_stop_accepting();
-    AX_LOG("shim stop accepting");
 #endif
     ax_net_stop();
     ax_mark(AX_MARK_NET_STOP);
@@ -326,7 +317,7 @@ static int run_network(int argc, const char **argv)
     ax_mark(AX_MARK_ADAPTER_CLOSED);
 
 cleanup:
-    AX_LOG("worker stopped, interface released");
+    AX_LOG("stopped");
     WHBLogUdpDeinit();
     return 0;
 }

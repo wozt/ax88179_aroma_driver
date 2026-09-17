@@ -1,0 +1,1 @@
+curl --ftp-pasv --user anonymous: -T aroma_module/AX88179Module.wms ftp://192.168.2.124/fs/vol/external01/wiiu/environments/aroma/modules/AX88179Module.wms

@@ -796,9 +796,9 @@ static int add_patch(function_replacement_data_t *data, const char *name, int pr
     if (st == FUNCTION_PATCHER_RESULT_SUCCESS) {
         if (handle_count < (int)(sizeof(handles) / sizeof(handles[0])))
             handles[handle_count++] = h;
-        WHBLogPrintf("AX88179 shim: %s %s for process %d (patched now: %s)",
-                     patched ? "patched" : "registered", name, process,
-                     patched ? "yes" : "waiting for nsysnet load");
+        SHIM_TRACE(2, "%s %s proc=%d (%s)",
+                   patched ? "patched" : "registered", name, process,
+                   patched ? "now" : "waiting");
     } else {
         WHBLogPrintf("AX88179 shim: FAILED to add patch %s (proc %d): %s",
                      name, process, FunctionPatcher_GetStatusStr(st));
@@ -846,7 +846,7 @@ int nsysnet_shim_install(void)
     }
     uint32_t version = 0;
     FunctionPatcher_GetVersion(&version);
-    WHBLogPrintf("AX88179 shim: function patcher API v%u, registering nsysnet hooks", version);
+    SHIM_TRACE(2, "FunctionPatcher v%u", version);
 
     SHIM_PATCH(socket);
     SHIM_PATCH(socketclose);
@@ -875,7 +875,6 @@ int nsysnet_shim_install(void)
 
     installed = 1;
     atomic_store(&accepting_sockets, 1);
-    WHBLogPrintf("AX88179 shim: %d patches registered", handle_count);
     return 0;
 fail:
     while (handle_count) FunctionPatcher_RemoveFunctionPatch(handles[--handle_count]);
