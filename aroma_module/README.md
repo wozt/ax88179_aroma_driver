@@ -1,4 +1,5 @@
 # AX88179 background module for Aroma
+/!\ This document is not up to date 
 
 ## Current diagnostic build (0.1.5)
 
