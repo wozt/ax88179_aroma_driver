@@ -1,94 +1,88 @@
-# AX88179 Wii U Aroma - findings actuels
+# AX88179 Wii U Aroma - Current Findings
 
 Date: 2026-09-17
 
-## SHIM VALIDÉ — TCP+UDP via l'adaptateur (2026-09-17)
+## SHIM VALIDATED — TCP+UDP through the adapter (2026-09-17)
 
-Le test `test_shim_boot` attend maintenant l'IP **localement** (sonde
-`socket()` : fallback natif marqué par `errno=-1`, puis `SO_MYADDR` non
-nul — lwIP renvoie 0.0.0.0 tant que DHCP n'a pas abouti), au lieu d'un
-aller-retour UDP vers le PC qui dépendait du serveur d'écho.
+The `test_shim_boot` test now waits for the IP address **locally** (`socket()` probe: native fallback is identified by `errno=-1`, then `SO_MYADDR` must be non-zero — lwIP returns `0.0.0.0` until DHCP has completed), instead of performing a UDP round trip to the PC, which depended on the echo server.
 
-Résultat console : `AX socket path ready (IP 192.168.2.190)`, puis
-TCP echo PASS 32/504/1024/1400 et UDP echo PASS 32/504/1024/1400 en
-boucle, 0 erreur. Côté PC, le serveur d'écho voit 100 % du trafic
-arriver de `192.168.2.190` (jamais `.124`). L'interception nsysnet est
-donc fonctionnelle pour un homebrew : sockets TCP/UDP via l'adaptateur
-AX88179, détection de l'IP sans dépendance externe.
+Console result: `AX socket path ready (IP 192.168.2.190)`, followed by TCP echo PASS 32/504/1024/1400 and UDP echo PASS 32/504/1024/1400 in a loop, with 0 errors.
 
-Rappel sortie WUHB : HOME overlay système -> `Quitter`, rien d'autre.
+On the PC side, the echo server sees 100% of the traffic arriving from `192.168.2.190` (never `.124`).
+
+The `nsysnet` interception is therefore functional for a homebrew application: TCP/UDP sockets go through the AX88179 adapter, with IP detection requiring no external dependency.
+
+WUHB exit reminder: system HOME overlay -> `Quit`, nothing else.
 
 ---
 
-## Objectif
+## Goal
 
-Faire fonctionner un adaptateur USB Ethernet AX88179 en Wii U mode via un module Aroma usermode, avec réseau disponible depuis le menu, les homebrews et les jeux.
+Make an AX88179 USB Ethernet adapter work in Wii U mode through a user-mode Aroma module, with networking available from the Wii U Menu, homebrew applications, and games.
 
-## État validé
+## Validated state
 
-- Le driver AX88179 sait initialiser l'adaptateur, démarrer RX/TX, obtenir DHCP et répondre au ping.
-- Le module Aroma `v0.2.2-shim-delay30` boote, attend 30 s, applique le patch IOSU/UHS, ouvre l'AX88179, démarre lwIP/DHCP et installe les hooks `nsysnet`.
-- IP observées : Wi-Fi Wii U `192.168.2.124`, Ethernet AX88179 `192.168.2.190`, PC `192.168.2.100`.
-- Le shim global intercepte bien des sockets d'un homebrew Aroma : capture confirmée avec paquets sortants depuis `192.168.2.190`.
-- Capture WUHB précédente : TCP SYN et UDP partent vers `192.168.2.100:18879`; le problème réseau du test n'était pas une absence d'émission.
-- FTP anonyme fonctionne sur la console quand elle n'est pas figée; upload testé vers `/fs/vol/external01/wiiu/apps/...`.
+* The AX88179 driver can initialize the adapter, start RX/TX, obtain a DHCP lease, and respond to ping.
+* Aroma module `v0.2.2-shim-delay30` boots, waits 30 seconds, applies the IOSU/UHS patch, opens the AX88179, starts lwIP/DHCP, and installs the `nsysnet` hooks.
+* Observed IP addresses: Wii U Wi-Fi `192.168.2.124`, AX88179 Ethernet `192.168.2.190`, PC `192.168.2.100`.
+* The global shim successfully intercepts sockets from an Aroma homebrew application: packet capture confirmed outgoing packets from `192.168.2.190`.
+* Previous WUHB capture: TCP SYN and UDP packets are sent toward `192.168.2.100:18879`; the test's networking issue was therefore not caused by a lack of transmission.
+* Anonymous FTP works on the console when it is not frozen; uploads were tested to `/fs/vol/external01/wiiu/apps/...`.
 
-## Problème actuel
+## Current issue
 
-Le blocage est maintenant côté lancement/sortie WUHB Aroma, pas côté AX88179/DHCP.
+The current blocker is on the Aroma WUHB launch/exit side, not the AX88179/DHCP side.
 
-- `AX88179 Shim Test` peut figer la console au lancement ou à la sortie HOME/MINUS.
-- `AX Safe Exit`, WUHB minimal sans réseau, sans shim, sans SDL et sans ProcUI, affiche un écran noir puis ne répond plus.
-- Ce résultat isole le bug : même un WUHB OSScreen + VPAD + auto-sortie 15 s ne sort pas proprement.
-- Le ping Ethernet peut continuer pendant que le WUHB est figé, donc le module AX peut rester vivant malgré le freeze de l'app.
+* `AX88179 Shim Test` can freeze the console when launching or exiting through HOME/MINUS.
+* `AX Safe Exit`, a minimal WUHB with no networking, no shim, no SDL, and no ProcUI, displays a black screen and then stops responding.
+* This isolates the bug: even an OSScreen + VPAD WUHB with a 15-second automatic exit does not exit cleanly.
+* Ethernet ping may continue while the WUHB is frozen, meaning the AX module can remain alive despite the application freeze.
 
-## Fichiers importants
+## Important files
 
-- Module Aroma : `wiiu_ethernet/aroma_module/`
-- Shim sockets : `wiiu_ethernet/aroma_module/nsysnet_shim.c`
-- Test WUHB shim : `wiiu_ethernet/test_shim_boot/`
-- Test minimal qui freeze aussi : `wiiu_ethernet/safe_exit_test/`
-- Echo server PC : `wiiu_ethernet/test_shim_boot/echo_server.py`
+* Aroma module: `wiiu_ethernet/aroma_module/`
+* Socket shim: `wiiu_ethernet/aroma_module/nsysnet_shim.c`
+* Shim WUHB test: `wiiu_ethernet/test_shim_boot/`
+* Minimal test that also freezes: `wiiu_ethernet/safe_exit_test/`
+* PC echo server: `wiiu_ethernet/test_shim_boot/echo_server.py`
 
-## Détails du module actuel
+## Current module details
 
-- Version module : `0.2.2-shim-delay30`.
-- Le worker attend 30 s avant de toucher UHS pour éviter de casser wiiload/RPXLoader pendant les transferts.
-- Ports réservés côté natif dans le shim : FTP `21`, wiiload `4299`.
-- Malgré ces exclusions, wiiload reste fragile sous hooks globaux.
+* Module version: `0.2.2-shim-delay30`.
+* The worker waits 30 seconds before touching UHS to avoid breaking wiiload/RPXLoader during transfers.
+* Native-side ports reserved by the shim: FTP `21`, wiiload `4299`.
+* Despite these exclusions, wiiload remains fragile with global hooks enabled.
 
-## Dernier test ajouté
+## Latest test added
 
-`safe_exit_test` a été créé pour isoler le problème WUHB :
+`safe_exit_test` was created to isolate the WUHB issue:
 
-- App Aroma : `AX Safe Exit`
-- SD : `/wiiu/apps/ax_safe_exit/ax_safe_exit.wuhb`
-- SHA1 : `d5df9f3da7a26b404307be9b4bfe02cd21798405`
-- Taille : `56652` octets
-- Code : OSScreen + VPAD, pas de réseau, pas de shim, pas de SDL, pas de ProcUI
-- Résultat utilisateur : écran noir, console bloquée
+* Aroma app: `AX Safe Exit`
+* SD: `/wiiu/apps/ax_safe_exit/ax_safe_exit.wuhb`
+* SHA1: `d5df9f3da7a26b404307be9b4bfe02cd21798405`
+* Size: `56652` bytes
+* Code: OSScreen + VPAD, no networking, no shim, no SDL, no ProcUI
+* User result: black screen, console frozen
 
+## Safe Exit v2 deployed
 
-## Safe Exit v2 déployé
+After the first `safe_exit_test` froze, it was compared with `wiiu_console/bringup`: the minimal test was not using the known ProcUI/VPAD skeleton from the repository.
 
-Après le freeze du premier `safe_exit_test`, comparaison avec `wiiu_console/bringup` : le test minimal n'utilisait pas le squelette ProcUI/VPAD connu du repo.
+Changes applied:
 
-Correction appliquée :
+* `safe_exit_test` now uses `ProcUIInitEx` through `proc.c/proc.h`, taken from `wiiu_console/bringup/src/`.
+* Explicit `VPADInit()` added.
+* OSScreen + text + HOME/MINUS/PLUS/B + 15-second auto-exit retained.
+* New WUHB copied and verified on SD: `/wiiu/apps/ax_safe_exit/ax_safe_exit.wuhb`.
+* SHA1 v2: `8f2e52db8d6542ac7a4df7276246d4702488a148`, size `62348` bytes.
 
-- `safe_exit_test` utilise maintenant `ProcUIInitEx` via `proc.c/proc.h` repris de `wiiu_console/bringup/src/`.
-- Ajout explicite de `VPADInit()`.
-- Garde OSScreen + texte + HOME/MINUS/PLUS/B + auto-exit 15 s.
-- Nouveau WUHB copié et vérifié sur SD : `/wiiu/apps/ax_safe_exit/ax_safe_exit.wuhb`.
-- SHA1 v2 : `8f2e52db8d6542ac7a4df7276246d4702488a148`, taille `62348` octets.
+To test: launch the `AX Safe Exit` icon again. If v2 exits cleanly, resume WUHB networking tests using this skeleton.
 
-À tester : relancer l'icône `AX Safe Exit`. Si v2 sort proprement, reprendre les tests WUHB réseau depuis ce squelette.
+## Safe Exit v2 console result
 
+User test: `AX Safe Exit v2` launched from Aroma.
 
-## Résultat console Safe Exit v2
-
-Test utilisateur : `AX Safe Exit v2` lancé depuis Aroma.
-
-Affichage observé :
+Observed display:
 
 ```text
 AX Safe Exit 2 - ProcUI skeleton
@@ -97,7 +91,7 @@ auto exit in 7 s
 HOME/MINUS/PLUS/B exits
 ```
 
-Logs UDP observés :
+Observed UDP logs:
 
 ```text
 AX88179 module: worker started v0.2.2-shim-delay30 (SHIM ON, RX sync 5000us)
@@ -119,69 +113,65 @@ AX88179 module: worker stopped, interface released
 ax_safe_exit2: done
 ```
 
-Conclusion :
+Conclusion:
 
-- Le squelette WUHB v2 est bon pour l'affichage, VPAD et la boucle principale.
-- L'app atteint `ax_safe_exit2: done`, donc le freeze ne vient plus du code applicatif avant `return 0`.
-- Après la sortie, la console reste figée sur menu + logo et le ping Ethernet ne répond plus.
-- Le problème restant est probablement dans la transition Aroma/ProcUI/retour titre ou dans le teardown/redémarrage du module Aroma autour de la fermeture de l'app.
-- Le log `worker stuck, leaving it to the process teardown` est suspect : il faut corriger l'arrêt du worker AX avant de continuer les tests shim réseau.
+* The v2 WUHB skeleton works correctly for display, VPAD, and the main loop.
+* The application reaches `ax_safe_exit2: done`, so the freeze is no longer caused by application code before `return 0`.
+* After exiting, the console remains frozen on the menu + logo and Ethernet ping stops responding.
+* The remaining issue is probably in the Aroma/ProcUI/title-return transition or in the teardown/restart of the Aroma module around application shutdown.
+* The `worker stuck, leaving it to the process teardown` log is suspicious: the AX worker shutdown needs to be fixed before continuing shim networking tests.
 
-Prochaine action recommandée :
+Recommended next action:
 
-1. Rendre l'arrêt du worker déterministe : flag stop, réveil RX, timeout court, ne pas laisser de thread bloqué dans UHS/RX pendant `APPLICATION_ENDS`.
-2. Tester `AX Safe Exit v2` avec le module AX désactivé ou avec shim/worker non démarré pour séparer bug ProcUI pur et bug teardown module.
-3. Si sans module le retour menu marche, corriger `aroma_module` avant tout nouveau WUHB réseau.
+1. Make worker shutdown deterministic: stop flag, wake RX, short timeout, and do not leave a thread blocked in UHS/RX during `APPLICATION_ENDS`.
+2. Test `AX Safe Exit v2` with the AX module disabled or with the shim/worker not started, to distinguish a pure ProcUI issue from a module teardown issue.
+3. If returning to the menu works without the module, fix `aroma_module` before performing any new WUHB networking tests.
 
+## Module v0.2.3-persist-worker deployed
 
-## Module v0.2.3-persist-worker déployé
+Change made after the freeze following `ax_safe_exit2: done`:
 
-Changement fait après le freeze post-`ax_safe_exit2: done` :
+* The AX worker is no longer stopped during `WUMS_APPLICATION_REQUESTS_EXIT` or `WUMS_APPLICATION_ENDS`.
+* These hooks only stop shim acceptance and log that the worker remains alive.
+* `WUMS_APPLICATION_STARTS` now calls `nsysnet_shim_begin_title()` even if the worker is already running.
+* `stop_worker()` remains used during `WUMS_DEINITIALIZE`.
+* Goal: avoid UHS/RX blocking during Aroma/WUHB transitions, suspected because of `worker stuck, leaving it to the process teardown`.
+* WMS copied and verified on SD: `/wiiu/environments/aroma/modules/AX88179Module.wms`.
+* SHA1: `ec8a3d6386886ef2af06f9211d2788f84e3f8773`.
 
-- Le worker AX n'est plus arrêté dans `WUMS_APPLICATION_REQUESTS_EXIT` ni `WUMS_APPLICATION_ENDS`.
-- Ces hooks arrêtent seulement l'acceptation shim et loggent que le worker reste vivant.
-- `WUMS_APPLICATION_STARTS` appelle maintenant `nsysnet_shim_begin_title()` même si le worker tourne déjà.
-- `stop_worker()` reste utilisé dans `WUMS_DEINITIALIZE`.
-- But : éviter le blocage UHS/RX pendant les transitions Aroma/WUHB, suspecté par `worker stuck, leaving it to the process teardown`.
-- WMS copié et vérifié sur SD : `/wiiu/environments/aroma/modules/AX88179Module.wms`.
-- SHA1 : `ec8a3d6386886ef2af06f9211d2788f84e3f8773`.
+To test after reboot: launch `AX Safe Exit`, wait for auto-exit or exit with B/MINUS, then verify menu return and ping.
 
-À tester après redémarrage : lancer `AX Safe Exit`, attendre l'auto-exit ou sortir avec B/MINUS, vérifier retour menu et ping.
+## Safe Exit v3 deployed
 
+Correction after clarification: menu boot works; the freeze occurs when exiting `AX Safe Exit`.
 
-## Safe Exit v3 déployé
+Probable cause found: `safe_exit_test` v2 reused the old `proc.c` from `wiiu_console/bringup`, which calls `SYSRelaunchTitle()` inside `proc_shutdown()`. This path had already been identified as blocking in the Aroma/Health & Safety context.
 
-Correction après clarification : le boot menu fonctionne, le blocage arrive à la sortie de `AX Safe Exit`.
+v3 changes:
 
-Cause probable trouvée : `safe_exit_test` v2 avait repris le vieux `proc.c` de `wiiu_console/bringup`, qui appelle `SYSRelaunchTitle()` dans `proc_shutdown()`. Ce chemin avait déjà été identifié comme bloquant dans le contexte Aroma/Health & Safety.
+* `safe_exit_test/proc.c` and `proc.h` replaced with the corrected version from `wiiu_ethernet/common/`.
+* `proc_shutdown()` no longer relaunches the title; it logs and then returns from `main`.
+* Display indicates `AX Safe Exit v3 - no relaunch`.
+* WUHB copied and verified on SD: `/wiiu/apps/ax_safe_exit/ax_safe_exit.wuhb`.
+* SHA1 v3: `82be508073d8bddd2bb85a79e1961b133895fc00`.
 
-Changement v3 :
+To test: launch `AX Safe Exit`, wait for auto-exit or exit with B/MINUS, then check whether the menu returns without freezing and whether ping remains active.
 
-- `safe_exit_test/proc.c` et `proc.h` remplacés par la version corrigée de `wiiu_ethernet/common/`.
-- `proc_shutdown()` ne relance plus le titre; il logge puis retourne de `main`.
-- L'affichage indique `AX Safe Exit v3 - no relaunch`.
-- WUHB copié et vérifié sur SD : `/wiiu/apps/ax_safe_exit/ax_safe_exit.wuhb`.
-- SHA1 v3 : `82be508073d8bddd2bb85a79e1961b133895fc00`.
+## Safe Exit v4 deployed
 
-À tester : lancer `AX Safe Exit`, attendre auto-exit ou sortir avec B/MINUS, vérifier si le menu revient sans freeze et si le ping reste actif.
+v3 result: the application reaches `AXPROBE ProcUI: shutdown end` and then `ax_safe_exit3: done`, but remains on a black screen. Therefore, execution continues until after `ProcUIShutdown`, but system return does not resume.
 
+v4 changes:
 
-## Safe Exit v4 déployé
+* `proc_stop()` still calls `SYSLaunchMenu()` to explicitly request a return to the menu.
+* `SYSRelaunchTitle()` remains forbidden.
+* `g_running` is then set to 0 to cleanly exit the loop.
+* Screen: `AX Safe Exit v4 - launch menu`.
+* SHA1 v4: `07fb64fcab6b597fdeea4e46fee5a4d2940de81b`.
 
-Résultat v3 : l'app atteint `AXPROBE ProcUI: shutdown end` puis `ax_safe_exit3: done`, mais reste sur écran noir. Donc le code sort jusqu'après `ProcUIShutdown`, mais le retour système ne reprend pas.
+## Safe Exit v5 ready but not yet deployed
 
-Changement v4 :
-
-- `proc_stop()` appelle toujours `SYSLaunchMenu()` pour demander explicitement le retour menu.
-- `SYSRelaunchTitle()` reste interdit.
-- `g_running` est ensuite mis à 0 pour sortir proprement de la boucle.
-- Écran : `AX Safe Exit v4 - launch menu`.
-- SHA1 v4 : `07fb64fcab6b597fdeea4e46fee5a4d2940de81b`.
-
-
-## Safe Exit v5 prêt mais pas encore déployé
-
-Résultat v4 :
+v4 result:
 
 ```text
 ax_safe_exit4: auto exit
@@ -193,33 +183,33 @@ AXPROBE ProcUI: shutdown end
 ax_safe_exit4: done
 ```
 
-La console reste ensuite sur écran noir. Interprétation : v4 fait `ProcUIShutdown()` trop tôt, juste après `PROCUI_STATUS_RELEASE_FOREGROUND` (status 2).
+The console then remains on a black screen.
 
-Changement v5 local :
+Interpretation: v4 calls `ProcUIShutdown()` too early, immediately after `PROCUI_STATUS_RELEASE_FOREGROUND` (status 2).
 
-- `proc_stop()` appelle `SYSLaunchMenu()` mais ne met plus `g_running=0`.
-- Le code continue à pomper `ProcUIProcessMessages()` après status 2.
-- `ProcUIDrawDoneRelease()` peut rendre le foreground, puis on attend `PROCUI_STATUS_EXITING` avant `ProcUIShutdown()`.
-- SHA1 v5 local : `2a58403af03cdb06838d1bd4d3752568e8d78762`.
-- Upload FTP non fait car la console était encore figée et `192.168.2.124:21` ne répondait plus.
+Local v5 changes:
 
+* `proc_stop()` calls `SYSLaunchMenu()` but no longer sets `g_running=0`.
+* The code continues pumping `ProcUIProcessMessages()` after status 2.
+* `ProcUIDrawDoneRelease()` can release the foreground, after which the code waits for `PROCUI_STATUS_EXITING` before calling `ProcUIShutdown()`.
+* Local v5 SHA1: `2a58403af03cdb06838d1bd4d3752568e8d78762`.
+* FTP upload not performed because the console was still frozen and `192.168.2.124:21` was no longer responding.
 
-## Module no-op isolation déployé
+## Module no-op isolation deployed
 
-Résultat v5 : ProcUI atteint `status=3`, `ProcUIShutdown end`, puis `ax_safe_exit5: done`, mais le menu reste bloqué au redémarrage. Cela prouve que le WUHB sort correctement jusqu'au bout.
+v5 result: ProcUI reaches `status=3`, `ProcUIShutdown end`, then `ax_safe_exit5: done`, but the menu remains frozen while restarting. This proves that the WUHB exits correctly all the way to completion.
 
-Test suivant déployé sur SD : module Aroma `0.2.4-noop-isolation`.
+Next test deployed to SD: Aroma module `0.2.4-noop-isolation`.
 
-- Aucun worker AX.
-- Aucun shim.
-- Hooks WUMS seulement loggés.
-- SHA1 WMS : `6edab878cb2c13f73b4d5d7d45d15422e740b4d1`.
-- But : lancer `AX Safe Exit v5` avec un module neutre. Si le menu revient, le freeze vient du worker AX/shim. Si ça bloque encore, le souci est hors module AX.
+* No AX worker.
+* No shim.
+* WUMS hooks only log events.
+* WMS SHA1: `6edab878cb2c13f73b4d5d7d45d15422e740b4d1`.
+* Goal: launch `AX Safe Exit v5` with a neutral module. If the menu returns, the freeze comes from the AX worker/shim. If it still freezes, the issue is outside the AX module.
 
+## No-op isolation result
 
-## Résultat no-op isolation
-
-Avec le module Aroma `0.2.4-noop-isolation` :
+With Aroma module `0.2.4-noop-isolation`:
 
 ```text
 AX88179 module: noop isolation loaded v0.2.4
@@ -237,91 +227,91 @@ AXPROBE ProcUI: shutdown end
 ax_safe_exit5: done
 ```
 
-La console reste bloquée au redémarrage du menu. Conclusion : le freeze n'est pas causé par le worker AX, le shim ou UHS. Il est dans la séquence de sortie WUHB/Aroma/ProcUI.
+The console remains frozen while restarting the menu.
 
-Détail affichage : la ligne `err=0 hold=00000000 trigger=00000000` est normale, elle vient du texte dessiné à l'écran par `safe_exit_test/main.c`, pas des logs UDP.
+Conclusion: the freeze is not caused by the AX worker, the shim, or UHS. It is in the WUHB/Aroma/ProcUI exit sequence.
 
-Prochain test : v6 doit traiter le contexte Aroma/Health & Safety comme un titre emprunté et utiliser `SYSRelaunchTitle()` après `ProcUIShutdown`, avec le module no-op encore actif pour tester cette sortie sans AX/shim.
+Display detail: the `err=0 hold=00000000 trigger=00000000` line is normal. It comes from text drawn on screen by `safe_exit_test/main.c`, not from UDP logs.
 
+Next test: v6 should treat the Aroma/Health & Safety context as a borrowed title and use `SYSRelaunchTitle()` after `ProcUIShutdown`, while keeping the no-op module active to test this exit path without AX/shim.
 
-## Résultat Safe Exit v6
+## Safe Exit v6 result
 
-Résultat utilisateur : `SYSRelaunchTitle()` ne revient pas au menu Aroma; il relance l'app de test elle-même.
+User result: `SYSRelaunchTitle()` does not return to the Aroma menu; it relaunches the test application itself.
 
-Conclusion : `SYSRelaunchTitle()` est rejeté pour ce contexte WUHB Aroma. Les pistes testées sont maintenant :
+Conclusion: `SYSRelaunchTitle()` is rejected for this WUHB Aroma context.
 
-- Retour simple après `ProcUIShutdown` : écran noir.
-- `SYSLaunchMenu()` puis attendre `EXITING` : bloqué au redémarrage menu.
-- `SYSRelaunchTitle()` : relance l'app elle-même.
+The tested approaches are now:
 
-Prochaine piste : tester un WUHB sans `SYSLaunchMenu` ni `SYSRelaunchTitle`, qui demande seulement l'arrêt ProcUI et retourne, mais avec une séquence plus proche des exemples Aroma/HBL si trouvée.
+* Simple return after `ProcUIShutdown`: black screen.
+* `SYSLaunchMenu()` followed by waiting for `EXITING`: frozen while restarting the menu.
+* `SYSRelaunchTitle()`: relaunches the application itself.
 
+Next approach: test a WUHB without `SYSLaunchMenu` or `SYSRelaunchTitle`, which only requests ProcUI shutdown and returns, but using a sequence closer to Aroma/HBL examples if one can be found.
 
-## Safe Exit v7 déployé
+## Safe Exit v7 deployed
 
-Après v6 : `SYSRelaunchTitle()` relance l'app elle-même, donc rejeté.
+After v6: `SYSRelaunchTitle()` relaunches the application itself, so this approach is rejected.
 
-Changement v7 :
+v7 changes:
 
-- Sortie par `_SYSDirectlyReturnToCaller()` après `ProcUIShutdown`.
-- Pas de `SYSLaunchMenu()`.
-- Pas de `SYSRelaunchTitle()`.
-- Écran : `AX Safe Exit v7 - direct return`.
-- SHA1 v7 : `b8edd704c2ee68589e2b70896609e21afc389473`.
+* Exit through `_SYSDirectlyReturnToCaller()` after `ProcUIShutdown`.
+* No `SYSLaunchMenu()`.
+* No `SYSRelaunchTitle()`.
+* Screen: `AX Safe Exit v7 - direct return`.
+* SHA1 v7: `b8edd704c2ee68589e2b70896609e21afc389473`.
 
+## Safe Exit v8 deployed
 
-## Safe Exit v8 déployé
+Observation: previous tests exited correctly (`2026-09-16-probe-home-direct-first/second`). They used the `probe_init` / `probe_poll` / `probe_shutdown` flow, with `ui_shutdown()` before `proc_shutdown()`.
 
-Constat : des tests précédents quittaient correctement (`2026-09-16-probe-home-direct-first/second`). Ils utilisaient le flux `probe_init` / `probe_poll` / `probe_shutdown`, avec `ui_shutdown()` avant `proc_shutdown()`.
+`safe_exit_test` v1-v7 used a custom OSScreen path and diverged from this flow.
 
-`safe_exit_test` v1-v7 utilisait un chemin OSScreen custom et divergeait de ce flux.
+v8 changes:
 
-Changement v8 :
+* `safe_exit_test` now reuses `common/probe.c`, `common/ui.c`, and `common/proc.c`.
+* `main` is reduced to `probe_init`, a `probe_poll` loop, auto-exit, then `probe_shutdown`.
+* This therefore uses the same flow as the tests that had already successfully returned to the menu twice.
+* SHA1 v8: `4fa11d2aaa973e67b7dc54e46ce490053d72b0e6`.
 
-- `safe_exit_test` reprend `common/probe.c`, `common/ui.c`, `common/proc.c`.
-- Le main est réduit à `probe_init`, boucle `probe_poll`, auto-exit, puis `probe_shutdown`.
-- Donc même flux que les tests qui avaient déjà rendu le menu deux fois.
-- SHA1 v8 : `4fa11d2aaa973e67b7dc54e46ce490053d72b0e6`.
+## Safe Exit v9 deployed
 
+Method correction after comparison with `capture2wiiu`: capture2wiiu exits through the system HOME overlay followed by the `Quit` button, not through auto-exit or a forced exit.
 
-## Safe Exit v9 déployé
+v9 changes:
 
-Correction de méthode après comparaison avec `capture2wiiu` : capture2wiiu quitte par le HOME overlay système puis bouton `Quitter`, pas par auto-exit ni sortie forcée.
+* HOME is no longer intercepted.
+* No auto-exit.
+* No `SYSLaunchMenu`, `SYSRelaunchTitle`, or `_SYSDirectlyReturnToCaller`.
+* Normal ProcUI, with the system HOME overlay allowed.
+* Test instruction: press HOME, then choose `Quit` in the Wii U interface.
+* SHA1 v9: `0cc7c011637b7dbbaa45016d6db68a507e5e00f4`.
 
-Changement v9 :
+## Safe Exit v9 result and normal module restored
 
-- HOME n'est plus intercepté.
-- Pas d'auto-exit.
-- Pas de `SYSLaunchMenu`, `SYSRelaunchTitle`, `_SYSDirectlyReturnToCaller`.
-- ProcUI normal, HOME overlay système autorisé.
-- Instruction test : appuyer HOME puis choisir `Quitter` dans l'interface Wii U.
-- SHA1 v9 : `0cc7c011637b7dbbaa45016d6db68a507e5e00f4`.
+User result: v9 works.
 
+The correct exit path for Aroma WUHB applications is the official HOME overlay followed by the `Quit` button. The forced exit methods tested previously were the actual problem.
 
-## Résultat Safe Exit v9 et restauration module normal
+Conclusion:
 
-Résultat utilisateur : v9 fonctionne. Le chemin correct de sortie pour les WUHB Aroma est le HOME overlay officiel puis bouton `Quitter`. Les sorties forcées testées avant étaient le problème.
+* Do not intercept HOME to exit normal test WUHB applications.
+* Allow the system HOME Menu overlay to open.
+* The user selects `Quit`.
+* Auto-exit, `SYSLaunchMenu`, `SYSRelaunchTitle`, and `_SYSDirectlyReturnToCaller` must not be used as the primary exit path.
 
-Conclusion :
+Normal AX module restored on SD:
 
-- Ne pas intercepter HOME pour quitter dans les WUHB de test normaux.
-- Laisser le menu HOME système s'ouvrir.
-- L'utilisateur choisit `Quitter`.
-- Les chemins auto-exit, `SYSLaunchMenu`, `SYSRelaunchTitle` et `_SYSDirectlyReturnToCaller` ne doivent pas servir de chemin principal.
+* Version: `0.2.3-persist-worker`.
+* Path: `/wiiu/environments/aroma/modules/AX88179Module.wms`.
+* SHA1: `54da8e746bdce256879aee8b0219ad29b74fe417`.
+* The no-op module remains as a backup under `AX88179Module.wms.off`.
 
-Module AX normal restauré sur SD :
+Next test: reboot with the normal module, wait for DHCP/ping, launch the tests, and exit through the official HOME overlay -> `Quit`.
 
-- Version : `0.2.3-persist-worker`.
-- Chemin : `/wiiu/environments/aroma/modules/AX88179Module.wms`.
-- SHA1 : `54da8e746bdce256879aee8b0219ad29b74fe417`.
-- Le no-op reste en backup sous `AX88179Module.wms.off`.
+## Module v0.2.5-restart-worker deployed
 
-Prochain test : redémarrer avec le module normal, attendre DHCP/ping, lancer les tests avec sortie via HOME overlay officiel -> `Quitter`.
-
-
-## Module v0.2.5-restart-worker déployé
-
-Résultat `0.2.3-persist-worker` : au menu, logs seulement :
+Result with `0.2.3-persist-worker`: at the menu, logs only show:
 
 ```text
 AX88179 module: worker started v0.2.3-persist-worker ...
@@ -329,53 +319,56 @@ AX88179 module: app requests exit, worker kept alive
 AX88179 module: app ended, worker kept alive
 ```
 
-Pas d'IP Ethernet ensuite. Conclusion : garder le worker vivant à travers une transition Aroma ne marche pas; le thread démarre dans un titre transitoire et n'atteint pas DHCP.
+No Ethernet IP address appears afterward.
 
-Changement `0.2.5-restart-worker` :
+Conclusion: keeping the worker alive across an Aroma transition does not work; the thread starts inside a transitional title and never reaches DHCP.
 
-- Retour au stop/restart sur `WUMS_APPLICATION_REQUESTS_EXIT` et `WUMS_APPLICATION_ENDS`.
-- Conserver la méthode correcte de sortie WUHB : HOME overlay officiel -> `Quitter`.
-- WMS copié et vérifié sur SD.
-- SHA1 : `ec95ecf61f6f06b9e492fa90ba33044ee045968a`.
+Changes in `0.2.5-restart-worker`:
 
-À tester après redémarrage : attendre les logs `worker started v0.2.5`, `IOSU patch`, DHCP BOUND, puis ping `192.168.2.190`.
+* Return to stop/restart behavior on `WUMS_APPLICATION_REQUESTS_EXIT` and `WUMS_APPLICATION_ENDS`.
+* Keep the correct WUHB exit method: official HOME overlay -> `Quit`.
+* WMS copied and verified on SD.
+* SHA1: `ec95ecf61f6f06b9e492fa90ba33044ee045968a`.
 
+To test after reboot: wait for the `worker started v0.2.5`, `IOSU patch`, and DHCP BOUND logs, then ping `192.168.2.190`.
 
-## Module v0.2.6-keep-ready déployé
+## Module v0.2.6-keep-ready deployed
 
-Résultat du premier `AX88179 Shim Test` avec v0.2.5 : TCP/UDP echo PASS, mais les PASS arrivent avant le nouveau `DHCP BOUND`. Cela peut être un faux positif via Wi-Fi/native fallback, car v0.2.5 stoppe le worker à la transition de titre puis attend 30 s avant de rouvrir l'AX.
+Result from the first `AX88179 Shim Test` with v0.2.5: TCP/UDP echo PASS, but the PASS messages occur before the new `DHCP BOUND`.
 
-Changement v0.2.6 :
+This may be a false positive through Wi-Fi/native fallback because v0.2.5 stops the worker during the title transition and then waits 30 seconds before reopening the AX adapter.
 
-- Si `ax_net_stack_ready()` est vrai pendant `APPLICATION_REQUESTS_EXIT/ENDS`, ne pas stopper le worker; seulement `nsysnet_shim_stop_accepting()` pendant la transition.
-- Au prochain `APPLICATION_STARTS`, `nsysnet_shim_begin_title()` réactive l'acceptation.
-- Si la stack n'est pas prête, conserver l'ancien stop/restart pour éviter le bug `persist-worker` dans les titres transitoires.
-- Ajout de timestamps relatifs (`[ms]`) aux logs du module.
-- SHA1 WMS : `7d18b6494b78b9cce41769ae267ac98f31d8eadf`.
+v0.2.6 changes:
 
-À tester : redémarrer, attendre DHCP menu, lancer `AX88179 Shim Test`, vérifier que le worker est gardé vivant et que les paquets `18879` sortent de `192.168.2.190`.
+* If `ax_net_stack_ready()` is true during `APPLICATION_REQUESTS_EXIT/ENDS`, do not stop the worker; only call `nsysnet_shim_stop_accepting()` during the transition.
+* On the next `APPLICATION_STARTS`, `nsysnet_shim_begin_title()` re-enables acceptance.
+* If the stack is not ready, keep the previous stop/restart behavior to avoid the `persist-worker` bug in transitional titles.
+* Relative timestamps (`[ms]`) added to module logs.
+* WMS SHA1: `7d18b6494b78b9cce41769ae267ac98f31d8eadf`.
 
-## Prochaine piste recommandée
+To test: reboot, wait for DHCP on the menu, launch `AX88179 Shim Test`, verify that the worker remains alive and that packets to port `18879` originate from `192.168.2.190`.
 
-1. Stopper les tests réseau WUHB tant que la base WUHB ne sort pas proprement.
-2. Trouver dans le repo ou sur la SD un WUHB Aroma connu fonctionnel, puis copier exactement son squelette init/loop/exit.
-3. Comparer avec `safe_exit_test`, surtout init écran, ProcUI, title/app metadata et règles Makefile/WUHB.
-4. Si OSScreen direct pose problème sous Aroma, remplacer par le squelette UI déjà validé dans un autre homebrew.
-5. Une fois un WUHB minimal qui lance et quitte proprement validé, réintroduire par étapes : logs écran, puis sockets natifs, puis shim, puis test TCP/UDP.
+## Recommended next approach
 
-## Commandes utiles
+1. Stop WUHB networking tests until the basic WUHB foundation exits cleanly.
+2. Find a known-working Aroma WUHB in the repository or on the SD card, then reproduce its exact init/loop/exit skeleton.
+3. Compare it with `safe_exit_test`, especially screen initialization, ProcUI, title/app metadata, and Makefile/WUHB rules.
+4. If direct OSScreen usage causes problems under Aroma, replace it with the UI skeleton already validated in another homebrew.
+5. Once a minimal WUHB that launches and exits cleanly has been validated, reintroduce features step by step: on-screen logs, then native sockets, then the shim, then TCP/UDP tests.
 
-Upload FTP :
+## Useful commands
+
+FTP upload:
 
 ```sh
 curl -sS --fail --ftp-create-dirs -T <file.wuhb> \
   ftp://anonymous:@192.168.2.124/fs/vol/external01/wiiu/apps/<app>/<app>.wuhb
 ```
 
-Vérifier echo server PC :
+Check the PC echo server:
 
 ```sh
 ss -ltnup | grep 18879 || python3 -u wiiu_ethernet/test_shim_boot/echo_server.py >/tmp/ax-boot-echo.log 2>&1 &
 ```
 
-Attention : ne pas utiliser `pgrep -af 'echo_server.py' || ...`, ça peut matcher son propre shell et ne pas lancer le serveur.
+Warning: do not use `pgrep -af 'echo_server.py' || ...`, because it may match its own shell command and therefore fail to start the server.
