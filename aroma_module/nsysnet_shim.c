@@ -110,6 +110,16 @@ static atomic_int mapped_fd[32];
 static atomic_int accepting_sockets;
 static atomic_uintptr_t probe_thread;
 static atomic_int probe_owns_accepting;
+static atomic_int shim_trace_level;
+
+void nsysnet_shim_set_trace_level(int level)
+{
+    atomic_store(&shim_trace_level, level);
+}
+
+#define SHIM_TRACE(level, fmt, ...) \
+    do { if (atomic_load(&shim_trace_level) >= (level)) \
+        WHBLogPrintf("AX88179 shim: " fmt, ##__VA_ARGS__); } while (0)
 static int shim_accepts(void) { return atomic_load(&accepting_sockets); }
 static int stack_fd(int fd) { return atomic_load(&mapped_fd[fd]); }
 static void track_fd(int fd, int lwfd) {
@@ -200,6 +210,7 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
         /* No adapter, or the stack is still coming up. Returning an
          * error here would break a title outright; a real socket just
          * puts it back on the console's own network. */
+        SHIM_TRACE(1, "socket(%d,%d,%d) -> NATIVE", domain, type, protocol);
         errno = -1;
         return real_socket(domain, type, protocol);
     }
@@ -227,15 +238,18 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
         return -1;
     }
     track_fd(fd, s);
+    SHIM_TRACE(1, "socket(%d,%d,%d) -> AX fd=%d lwfd=%d", domain, type, protocol, fd, s);
     return fd;
 }
 
 DECL_FUNCTION(int, socketclose, int sockfd)
 {
     if (is_foreign(sockfd)) {
+        SHIM_TRACE(1, "close(fd=%d) -> NATIVE", sockfd);
         errno = -1;
         return real_socketclose(sockfd);
     }
+    SHIM_TRACE(1, "close(fd=%d/lwfd=%d) -> AX", sockfd, stack_fd(sockfd));
     errno = 0;
     int r = lwip_close(stack_fd(sockfd));
     if (r == 0) { untrack_fd(sockfd); real_socketclose(sockfd); }
@@ -271,7 +285,12 @@ DECL_FUNCTION(int, bind, int sockfd, const struct nsn_sockaddr *addr, socklen_t 
 
 DECL_FUNCTION(int, connect, int sockfd, const struct nsn_sockaddr *addr, socklen_t addrlen)
 {
-    if (is_foreign(sockfd)) { errno = -1; return real_connect(sockfd, addr, addrlen); }
+    if (is_foreign(sockfd)) {
+        SHIM_TRACE(1, "connect(fd=%d) -> NATIVE", sockfd);
+        errno = -1;
+        return real_connect(sockfd, addr, addrlen);
+    }
+    SHIM_TRACE(1, "connect(fd=%d/lwfd=%d) -> AX", sockfd, stack_fd(sockfd));
     errno = 0;
     struct sockaddr_in l;
     if (!sockaddr_to_lwip(&l, addr, addrlen)) { errno = EAFNOSUPPORT; return -1; }

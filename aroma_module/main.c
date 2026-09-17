@@ -31,6 +31,20 @@ static OSThread watchdog __attribute__((aligned(0x40)));
 static int watchdog_started;
 static uint8_t wd_stack[16 * 1024] __attribute__((aligned(0x40)));
 
+static int load_shim_trace(void)
+{
+    FILE *f=fopen("fs:/vol/external01/wiiu/ax88179/config.ini","r");
+    if (!f) return 0;
+    char b[128];
+    int level=0;
+    while (fgets(b,sizeof(b),f))
+        if (sscanf(b,"shim_trace=%d",&level)==1) break;
+    fclose(f);
+    if (level < 0) level=0;
+    if (level > 2) level=2;
+    return level;
+}
+
 static int load_keep_first(void)
 {
     FILE *f=fopen("fs:/vol/external01/wiiu/ax88179/config.ini","r");
@@ -127,6 +141,10 @@ static int run_network(int argc, const char **argv)
     AX_LOG("startup guard finished, beginning bring-up");
 
     /* A fresh process: nothing lwIP left behind is still valid. */
+    int shim_trace = load_shim_trace();
+    nsysnet_shim_set_trace_level(shim_trace);
+    AX_LOG("shim trace level: %d", shim_trace);
+
     int keep_first = load_keep_first();
     ax_net_set_session_lease_mode(keep_first);
     AX_LOG("DHCP mode: %s", keep_first ? "keep_first" : "always");
