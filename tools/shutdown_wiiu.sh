@@ -1,1 +1,2 @@
-/home/wozt/dev/capture2cloud/wiiu_ethernet/tools/remote_reboot/reboot-wiiu.sh
+#!/bin/bash
+exec "$(dirname "$0")/remote_poweroff/poweroff-wiiu.sh" "$@"

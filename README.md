@@ -297,9 +297,9 @@ Notable examples include:
 * `send_module_via_ftp.sh` — upload the Aroma module over FTP.
 * `launch_udplogserver.sh` — start the UDP logging environment.
 * `shutdown_wiiu.sh` — remote console power helper.
-* `remote_reboot/` — small RPX and wiiload helper for requesting a system power transition.
+* `remote_poweroff/` — small RPX and wiiload helper for remotely powering off the Wii U.
 
-The current `remote_reboot` RPX calls `OSLaunchTitlev(OS_TITLE_ID_REBOOT, ...)`. On the tested console this powers the Wii U off but does not power it back on, so it currently behaves as a remote power-off helper rather than a reliable full reboot tool.
+The `remote_poweroff` RPX calls `OSLaunchTitlev(OS_TITLE_ID_REBOOT, ...)`. Despite the API name, on the tested console this powers the Wii U off without powering it back on, so the tool is intentionally documented and named as a remote power-off helper.
 
 ---
 

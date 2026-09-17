@@ -12,7 +12,7 @@ include $(DEVKITPPC)/base_tools
 
 WUT_ROOT := $(DEVKITPRO)/wut
 
-TARGET  := reboot
+TARGET  := poweroff
 BUILD   := build
 SOURCES := .
 INCLUDES :=
