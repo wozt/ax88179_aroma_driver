@@ -2,6 +2,19 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdio.h>
+
+static int load_keep_first(void)
+{
+    FILE *f=fopen("fs:/vol/external01/wiiu/ax88179/config.ini","r");
+    if (!f) return 1;
+    char b[128];
+    int keep=1;
+    while (fgets(b,sizeof(b),f))
+        if (strstr(b,"mode=always")) keep=0;
+    fclose(f);
+    return keep;
+}
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <coreinit/debug.h>
@@ -71,6 +84,7 @@ static int run_watchdog(int argc, const char **argv)
 }
 static atomic_bool stopping;
 static int started;
+static atomic_uint worker_generation;
 
 /* The worker exclusively owns UHS and lwIP. App transition hooks only signal
  * stop, then join before per-title resources/newlib are finalized. */
@@ -86,12 +100,38 @@ static int run_network(int argc, const char **argv)
     /* RPXLoader/wiiload starts a short-lived title to receive the payload.
      * Touching UHS during that transfer can strand the worker in teardown.
      * Let short-lived loader titles exit before opening the adapter. */
-    for (int i = 0; i < 300; i++) {
-        if (atomic_load_explicit(&stopping, memory_order_acquire)) goto cleanup;
+    /*
+     * The first worker starts while Aroma/RPXLoader is still going through
+     * its initial title transitions. Touching UHS too early during that
+     * first boot can prevent the AX88179 bring-up entirely.
+     *
+     * Later application transitions only need a short guard before
+     * reacquiring UHS.
+     */
+    unsigned generation =
+        atomic_fetch_add_explicit(&worker_generation, 1,
+                                  memory_order_relaxed);
+
+    const unsigned startup_delay_ms = (generation == 0) ? 25000 : 2000;
+
+    AX_LOG("startup guard %u ms (%s)",
+           startup_delay_ms,
+           generation == 0 ? "initial boot" : "title transition");
+
+    for (unsigned waited = 0; waited < startup_delay_ms; waited += 100) {
+        if (atomic_load_explicit(&stopping, memory_order_acquire))
+            goto cleanup;
+
         OSSleepTicks(OSMillisecondsToTicks(100));
     }
 
+    AX_LOG("startup guard finished, beginning bring-up");
+
     /* A fresh process: nothing lwIP left behind is still valid. */
+    int keep_first = load_keep_first();
+    ax_net_set_session_lease_mode(keep_first);
+    AX_LOG("DHCP mode: %s", keep_first ? "keep_first" : "always");
+
     ax_net_forget();
 
     /* Hooks are activated automatically at boot when SHIM=1, not by an UPID test.
