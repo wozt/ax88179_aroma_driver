@@ -87,12 +87,14 @@ static int wait_ax_ping_ready(void)
         errno = 0;
         int fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (fd >= 0) {
-            int native = (errno == -1);
             uint32_t addr = 0;
             socklen_t len = sizeof(addr);
             int rc = getsockopt(fd, SOL_SOCKET, SO_MYADDR, &addr, &len);
             close(fd);
-            if (!native && rc == 0 && addr != 0) {
+            struct in_addr expected_ax;
+            inet_pton(AF_INET, "192.168.2.190", &expected_ax);
+
+            if (rc == 0 && addr == expected_ax.s_addr) {
                 struct in_addr a = { .s_addr = addr };
                 char buf[16];
                 inet_ntop(AF_INET, &a, buf, sizeof(buf));

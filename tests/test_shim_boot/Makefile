@@ -16,9 +16,9 @@ include $(DEVKITPRO)/wut/share/wut_rules
 #-------------------------------------------------------------------------------
 TARGET		:=	test_shim_boot
 BUILD		:=	build
-SOURCES		:=	. ../common
+SOURCES		:=	. ../../common
 DATA		:=
-INCLUDES	:=	../common
+INCLUDES	:=	../../common
 #-------------------------------------------------------------------------------
 CFLAGS		:=	-g -O2 -Wall $(MACHDEP)
 CFLAGS		+=	-D__WIIU__ -D__WUT__
