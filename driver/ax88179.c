@@ -11,6 +11,7 @@
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <nsysuhs/uhs.h>
+#include <whb/log.h>
 #endif
 
 /*
@@ -138,6 +139,9 @@ static uint8_t g_tx[2048] __attribute__((aligned(0x40)));
 static UhsInterfaceProfile g_profiles[MAX_IFACES] __attribute__((aligned(0x40)));
 /* Static DMA buffers: one instance, called serially by its owner thread. */
 static int g_open;
+static unsigned phy_init_generation;
+static int debug_last_link = -1;
+static OSTime debug_link_start;
 
 /* The chip speaks little-endian and this console does not. */
 static uint32_t le32(const uint8_t *p)
@@ -323,9 +327,31 @@ Ax88179 *ax88179_open(char *why, unsigned why_size)
     g_open = 1;
     const char *stage = "PHY power reset";
 #define CHECK(call) do { if ((call) != 0) goto fail; } while (0)
-    CHECK(mac_write16(ax, AX_PHYPWR_RSTCTL, 0));
-    CHECK(mac_write16(ax, AX_PHYPWR_RSTCTL, AX_PHYPWR_RSTCTL_IPRL));
-    sleep_ms(500);
+    int warm_phy = (phy_init_generation != 0);
+    if (warm_phy) {
+        uint16_t warm_bmcr = 0xffff;
+        uint16_t warm_bmsr = 0xffff;
+
+        if (ax88179_read_phy(ax, 0, &warm_bmcr) != 0 ||
+            ax88179_read_phy(ax, 1, &warm_bmsr) != 0 ||
+            warm_bmcr == 0xffff || warm_bmcr == 0x0000 ||
+            warm_bmsr == 0xffff || warm_bmsr == 0x0000) {
+            WHBLogPrintf("AX88179 PHY: warm validation FAILED, falling back to cold");
+            warm_phy = 0;
+        } else {
+            WHBLogPrintf("AX88179 PHY: warm validation OK BMCR=%04x BMSR=%04x",
+                         warm_bmcr, warm_bmsr);
+        }
+    }
+
+    if (!warm_phy) {
+        WHBLogPrintf("AX88179 PHY: cold power reset");
+        CHECK(mac_write16(ax, AX_PHYPWR_RSTCTL, 0));
+        CHECK(mac_write16(ax, AX_PHYPWR_RSTCTL, AX_PHYPWR_RSTCTL_IPRL));
+        sleep_ms(500);
+    } else {
+        WHBLogPrintf("AX88179 PHY: warm reopen, skipping power reset");
+    }
     stage = "clock select";
     CHECK(mac_write8(ax, AX_CLK_SELECT, 3));
     sleep_ms(200);
@@ -354,7 +380,16 @@ Ax88179 *ax88179_open(char *why, unsigned why_size)
     CHECK(ax88179_read_phy(ax, 0, &bmcr));
     if (bmcr == 0xffff) goto fail;
     /* Preserve speed defaults; clear reset, loopback, powerdown/isolate. */
-    CHECK(phy_write(ax, 0, (bmcr & ~0xcc00u) | 0x1200));
+    uint16_t new_bmcr = (bmcr & ~0xcc00u) | 0x1000;
+    if (!warm_phy)
+        new_bmcr |= 0x0200; /* cold/fallback path: restart autoneg */
+    CHECK(phy_write(ax, 0, new_bmcr));
+    debug_link_start = OSGetTime();
+    debug_last_link = -1;
+    WHBLogPrintf("AX88179 PHY: autoneg %s (generation %u, BMCR %04x -> %04x)",
+                 warm_phy ? "KEEP" : "RESTART",
+                 phy_init_generation, bmcr, new_bmcr);
+    phy_init_generation++;
 
     /* UHS endpoint mask: OUT in bits 0..15, IN in bits 16..31,
      * matching wut UHSEndpointGetMask. Bulk direction is a separate argument. */
@@ -414,6 +449,16 @@ int ax88179_link(Ax88179 *ax, int *speed)
         ax88179_read_phy(ax, 1, &bmsr) || ax88179_read_phy(ax, 0x11, &status))
         return -1;
     if (bmsr == 0xffff || status == 0xffff) return -1;
+
+    int debug_up = ((bmsr & 4) && (bmsr & 0x20) && (status & 0x400));
+    if (debug_up != debug_last_link) {
+        uint64_t elapsed = OSTicksToMilliseconds(OSGetTime() - debug_link_start);
+        WHBLogPrintf("AX88179 PHY: link=%s after %llu ms BMSR=%04x STATUS=%04x",
+                     debug_up ? "UP" : "DOWN",
+                     (unsigned long long)elapsed,
+                     bmsr, status);
+        debug_last_link = debug_up;
+    }
     if (!(bmsr & 4) || !(bmsr & 0x20) || !(status & 0x400)) {
         if (ax->medium && mac_write16(ax, AX_MEDIUM_STATUS_MODE, 0)) return -1;
         ax->medium = 0;

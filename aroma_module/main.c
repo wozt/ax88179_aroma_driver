@@ -205,7 +205,11 @@ static int run_network(int argc, const char **argv)
     /* Open adapter */
     Ax88179 *ax = NULL;
     char why[160];
+    OSTime t_open = OSGetTime();
+    AX_LOG("TIMING: ax88179_open begin");
     ax = ax88179_open(why, sizeof(why));
+    AX_LOG("TIMING: ax88179_open end: %llu ms",
+           (unsigned long long)OSTicksToMilliseconds(OSGetTime() - t_open));
     if (!ax) {
         AX_LOG("%s", why);
         goto cleanup;
@@ -213,11 +217,15 @@ static int run_network(int argc, const char **argv)
     ax_mark(AX_MARK_ADAPTER_OPEN);
 
     /* Initialize lwIP */
+    OSTime t_net = OSGetTime();
+    AX_LOG("TIMING: ax_net_start begin");
     if (ax_net_start(ax) != 0) {
         AX_LOG("network initialization failed");
         ax88179_close(ax);
         goto cleanup;
     }
+    AX_LOG("TIMING: ax_net_start end: %llu ms",
+           (unsigned long long)OSTicksToMilliseconds(OSGetTime() - t_net));
     ax_mark(AX_MARK_NET_STARTED);
 
     /* Wait for DHCP or timeout (30s) */
