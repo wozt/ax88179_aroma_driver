@@ -1,0 +1,84 @@
+# =========================
+# Build outputs
+# =========================
+build/
+**/build/
+*.o
+*.d
+*.a
+*.so
+*.elf
+*.rpx
+*.wuhb
+*.wms
+
+# =========================
+# Firmware / extracted binaries
+# =========================
+*.bin
+*.rpl
+*.img
+*.dec
+fw.*
+ios/
+
+# =========================
+# Ghidra
+# =========================
+ghidra/
+ghidra_ppc/
+
+# Keep Ghidra scripts if useful source code.
+# Uncomment this if you DON'T want them either:
+ghidra_scripts/
+
+*.gpr
+*.rep/
+*.gbf
+*.prp
+
+# =========================
+# Logs / packet captures /
+# generated test results
+# =========================
+test-results/
+*.log
+*.pcap
+*.pcapng
+
+# =========================
+# Backups / temporary files
+# =========================
+*.bak
+*.backup
+*.tmp
+*.swp
+*~
+.DS_Store
+
+# =========================
+# Python generated files
+# =========================
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# =========================
+# IDE / local configuration
+# =========================
+.vscode/
+.idea/
+.clangd/
+.cache/
+
+# =========================
+# Locally supplied Wii U libs
+# =========================
+vendor/wums/
+vendor/libmocha/
+vendor/functionpatcher/
+
+wiiu_patch_iosu/
+# OTHER
+
+KIMI_HANDOFF_PROMPT.md
