@@ -30,6 +30,8 @@ The project provides a native AX88179 USB driver, a dedicated **lwIP network sta
 * [x] Configurable DHCP behavior through `SD:/wiiu/ax88179/config.ini`.
 * [x] Optional session-level DHCP lease caching for faster network recovery after title transitions.
 * [x] Network worker stop/restart across title transitions while retaining the first successful DHCP configuration for the current Aroma session.
+* [x] Fast warm PHY reopen across title transitions, with PHY validation and automatic cold-reset fallback.
+* [x] Compact timestamped module/PHY diagnostics and configurable shim tracing.
 
 
 ### Experimental / incomplete
@@ -39,7 +41,7 @@ The project provides a native AX88179 USB driver, a dedicated **lwIP network sta
 * [ ] Transparent NSSL/TLS support
 * [ ] Wii U system services
 * [ ] Wii U Menu networking
-* [ ] Browser / eShop networking
+* [ ] Browser / eShop networking — the Wii U Browser has been observed continuing to use the native Wi-Fi interface rather than the current GAME-process shim
 * [ ] Fully transparent system-wide Ethernet replacement
 
 ---
@@ -93,6 +95,7 @@ The AX88179 driver and lwIP stack are independent from the Wii U's native networ
 │   └── port/           Wii U/coreinit lwIP port
 ├── common/             Shared Wii U helper code
 ├── tests/              Host and Wii U tests
+├── tools/              Development, deployment and diagnostic utilities
 ├── vendor/             Vendored dependencies
 ├── FINDINGS.md         Development notes and reverse-engineering findings
 └── README.md
@@ -225,6 +228,38 @@ Available modes:
 
 `keep_first` only caches the configuration in RAM. A full console reboot clears it and causes DHCP to run normally again.
 
+Shim logging is configured in the same file:
+
+```ini
+[debug]
+shim_trace=1
+```
+
+Trace levels:
+
+* `0` — disable normal shim tracing.
+* `1` — trace normal socket activity such as socket/connect/close and related calls.
+* `2` — verbose debugging, including FunctionPatcher registration details.
+
+---
+
+## Fast title-transition recovery
+
+The network worker is deliberately stopped and recreated across Wii U title transitions.
+
+Keeping the worker permanently alive was tested and rejected because UHS/lwIP state cannot safely be assumed to survive the title lifecycle.
+
+The current implementation combines:
+
+* a `25 s` guard for the first worker of an Aroma boot;
+* a `2 s` guard for later title transitions;
+* session-level DHCP lease caching in `keep_first` mode;
+* warm PHY reuse when the existing PHY state is still valid.
+
+Measured on the development setup, a cold PHY link took roughly 3.1 seconds to renegotiate, while a validated warm reopen recovered the existing link in roughly 13-15 ms.
+
+If warm PHY validation fails, the driver automatically falls back to the normal cold power-reset and autonegotiation path.
+
 ---
 
 ## Debugging
@@ -235,7 +270,36 @@ They can be monitored from a computer using `udplogserver`.
 
 A successful initialization should eventually show the AX88179 interface obtaining a DHCP lease.
 
+Typical compact logs look like:
+
+```text
+[249437556335] AX: start guard=2000ms gen=1 shim=on
+[249437558372] PHY: warm reopen
+[249437558624] AX: open 252ms
+[249437558654] AX: net 30ms
+[249437558656] AX: lease cached 192.168.2.190
+[249437558756] AX: shim ready hooks=24
+[249437558758] AX: ready 192.168.2.190
+```
+
+Detailed FunctionPatcher registration messages are only shown with `shim_trace=2`.
+
 The project also contains dedicated diagnostic applications and host-side regression tests for testing the driver, lwIP integration and socket shim independently.
+
+---
+
+## Development tools
+
+The `tools/` directory contains utilities used during development and deployment.
+
+Notable examples include:
+
+* `send_module_via_ftp.sh` — upload the Aroma module over FTP.
+* `launch_udplogserver.sh` — start the UDP logging environment.
+* `shutdown_wiiu.sh` — remote console power helper.
+* `remote_reboot/` — small RPX and wiiload helper for requesting a system power transition.
+
+The current `remote_reboot` RPX calls `OSLaunchTitlev(OS_TITLE_ID_REBOOT, ...)`. On the tested console this powers the Wii U off but does not power it back on, so it currently behaves as a remote power-off helper rather than a reliable full reboot tool.
 
 ---
 

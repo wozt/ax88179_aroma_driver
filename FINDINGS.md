@@ -2,6 +2,34 @@
 
 Date: 2026-09-17
 
+## Current validated state — 2026-09-17
+
+This section describes the current implementation. Older sections below are kept as a development journal and may describe experiments or approaches that were later rejected.
+
+### Title transition lifecycle
+
+The AX network worker is stopped and recreated across title transitions. Keeping it alive across transitions was tested and rejected because it could remain attached to a transitional title and fail to bring the interface back correctly.
+
+Current startup guards:
+
+* `25000 ms` for the first worker of an Aroma session.
+* `2000 ms` for subsequent title transitions.
+
+The first guard avoids touching UHS during the initial Aroma/RPXLoader transitions. Later transitions only require the shorter 2-second guard.
+
+### Fast warm PHY recovery
+
+A major title-transition delay was traced to resetting the AX88179 PHY on every reopen.
+
+The first open performs the normal PHY power reset and restarts autonegotiation. On later opens the driver validates BMCR/BMSR first. If the PHY is still valid, the reset is skipped and the existing link is retained. If validation fails, the driver falls back to the normal cold-reset path.
+
+Observed timings:
+
+* Cold open: about `754 ms`, with link UP after about `3130 ms`.
+* Warm open: about `252 ms`, with link UP after about `13-15 ms`.
+
+Together with the 2-second transition guard and cached DHCP configuration, normal Ethernet recovery after a title transition dropped from roughly 5.5 seconds to roughly 2.4 seconds.
+
 ### Session DHCP lease caching
 
 Repeated DHCP negotiation after every title transition was unnecessary and added noticeable network bring-up time.
