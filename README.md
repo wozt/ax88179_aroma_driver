@@ -27,9 +27,9 @@ The project provides a native AX88179 USB driver, a dedicated **lwIP network sta
 * [x] UDP
 * [x] Experimental `nsysnet` socket interception
 * [x] TCP/UDP traffic from a Wii U homebrew routed through the AX88179 interface
-* [x]Configurable DHCP behavior through `SD:/wiiu/ax88179/config.ini`.
-* [x]Optional session-level DHCP lease caching for faster network recovery after title transitions.
-* [x]Network worker stop/restart across title transitions while retaining the first successful DHCP configuration for the current Aroma session.
+* [x] Configurable DHCP behavior through `SD:/wiiu/ax88179/config.ini`.
+* [x] Optional session-level DHCP lease caching for faster network recovery after title transitions.
+* [x] Network worker stop/restart across title transitions while retaining the first successful DHCP configuration for the current Aroma session.
 
 
 ### Experimental / incomplete

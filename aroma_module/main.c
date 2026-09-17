@@ -2,19 +2,6 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdio.h>
-
-static int load_keep_first(void)
-{
-    FILE *f=fopen("fs:/vol/external01/wiiu/ax88179/config.ini","r");
-    if (!f) return 1;
-    char b[128];
-    int keep=1;
-    while (fgets(b,sizeof(b),f))
-        if (strstr(b,"mode=always")) keep=0;
-    fclose(f);
-    return keep;
-}
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <coreinit/debug.h>
@@ -43,6 +30,18 @@ static uint8_t stack[64 * 1024] __attribute__((aligned(0x40)));
 static OSThread watchdog __attribute__((aligned(0x40)));
 static int watchdog_started;
 static uint8_t wd_stack[16 * 1024] __attribute__((aligned(0x40)));
+
+static int load_keep_first(void)
+{
+    FILE *f=fopen("fs:/vol/external01/wiiu/ax88179/config.ini","r");
+    if (!f) return 1;
+    char b[128];
+    int keep=1;
+    while (fgets(b,sizeof(b),f))
+        if (strstr(b,"mode=always")) keep=0;
+    fclose(f);
+    return keep;
+}
 
 static const char *const mark_names[] = {
     "worker started", "udp log inited", "iosu patch", "adapter opened",
