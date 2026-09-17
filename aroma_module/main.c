@@ -25,36 +25,64 @@ WUMS_MODULE_AUTHOR("wozt");
 WUMS_MODULE_VERSION("0.2.7-restart-wait-test");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
+/* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
+ * devices exposed by WUMS, including fs:/vol/external01. */
+WUMS_USE_WUT_DEVOPTAB();
+
+
 static OSThread worker __attribute__((aligned(0x40)));
 static uint8_t stack[64 * 1024] __attribute__((aligned(0x40)));
 static OSThread watchdog __attribute__((aligned(0x40)));
 static int watchdog_started;
 static uint8_t wd_stack[16 * 1024] __attribute__((aligned(0x40)));
 
-static int load_shim_trace(void)
-{
-    FILE *f=fopen("fs:/vol/external01/wiiu/ax88179/config.ini","r");
-    if (!f) return 0;
-    char b[128];
-    int level=0;
-    while (fgets(b,sizeof(b),f))
-        if (sscanf(b,"shim_trace=%d",&level)==1) break;
-    fclose(f);
-    if (level < 0) level=0;
-    if (level > 2) level=2;
-    return level;
-}
+static int config_keep_first = 1;
+static int config_shim_trace = 0;
 
-static int load_keep_first(void)
+static void load_config(void)
 {
-    FILE *f=fopen("fs:/vol/external01/wiiu/ax88179/config.ini","r");
-    if (!f) return 1;
+    static const char *paths[] = {
+        "fs:/vol/external01/wiiu/ax88179/config.ini",
+        "/fs/vol/external01/wiiu/ax88179/config.ini",
+        "fs:/wiiu/ax88179/config.ini"
+    };
+
+    FILE *f = NULL;
+
+    for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        f = fopen(paths[i], "r");
+        if (f) {
+            AX_LOG("CONFIG: opened %s", paths[i]);
+            break;
+        }
+    }
+
+    if (!f) {
+        AX_LOG("CONFIG: fopen failed on all paths");
+        return;
+    }
+
     char b[128];
-    int keep=1;
-    while (fgets(b,sizeof(b),f))
-        if (strstr(b,"mode=always")) keep=0;
+
+    while (fgets(b, sizeof(b), f)) {
+        if (strstr(b, "mode=always"))
+            config_keep_first = 0;
+        else if (strstr(b, "mode=keep_first"))
+            config_keep_first = 1;
+
+        int level;
+        if (sscanf(b, "shim_trace=%d", &level) == 1) {
+            if (level < 0) level = 0;
+            if (level > 2) level = 2;
+            config_shim_trace = level;
+        }
+    }
+
     fclose(f);
-    return keep;
+
+    AX_LOG("CONFIG: DHCP mode = %s",
+           config_keep_first ? "keep_first" : "always");
+    AX_LOG("CONFIG: shim trace = %d", config_shim_trace);
 }
 
 static const char *const mark_names[] = {
@@ -141,13 +169,12 @@ static int run_network(int argc, const char **argv)
     AX_LOG("startup guard finished, beginning bring-up");
 
     /* A fresh process: nothing lwIP left behind is still valid. */
-    int shim_trace = load_shim_trace();
-    nsysnet_shim_set_trace_level(shim_trace);
-    AX_LOG("shim trace level: %d", shim_trace);
+    nsysnet_shim_set_trace_level(config_shim_trace);
+    AX_LOG("shim trace level: %d", config_shim_trace);
 
-    int keep_first = load_keep_first();
-    ax_net_set_session_lease_mode(keep_first);
-    AX_LOG("DHCP mode: %s", keep_first ? "keep_first" : "always");
+    ax_net_set_session_lease_mode(config_keep_first);
+    AX_LOG("DHCP mode: %s",
+           config_keep_first ? "keep_first" : "always");
 
     ax_net_forget();
 
@@ -314,6 +341,10 @@ static void stop_worker(void)
 WUMS_INITIALIZE(args)
 {
     (void)args;
+
+    AX_LOG("CONFIG: loading during WUMS initialization");
+    load_config();
+
     /* Device handles belong to a title; create them in APPLICATION_STARTS. */
 }
 
