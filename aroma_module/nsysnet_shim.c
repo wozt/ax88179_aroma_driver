@@ -111,10 +111,16 @@ static atomic_int accepting_sockets;
 static atomic_uintptr_t probe_thread;
 static atomic_int probe_owns_accepting;
 static atomic_int shim_trace_level;
+static atomic_int system_dns;
 
 void nsysnet_shim_set_trace_level(int level)
 {
     atomic_store(&shim_trace_level, level);
+}
+
+void nsysnet_shim_set_system_dns(int enabled)
+{
+    atomic_store(&system_dns, enabled ? 1 : 0);
 }
 
 #define SHIM_TRACE(level, fmt, ...) \
@@ -258,14 +264,23 @@ DECL_FUNCTION(int, socketclose, int sockfd)
 
 DECL_FUNCTION(int, socketclose_all, void)
 {
-    if (!shim_accepts()) { errno = -1; return real_socketclose_all(); }
+    if (!shim_accepts()) {
+        SHIM_TRACE(1, "close_all -> NATIVE");
+        errno = -1;
+        return real_socketclose_all();
+    }
     uint32_t m = atomic_exchange(&open_mask, 0);
-    for (int s = 0; s < 32; s++)
-        if (m & (1u << s)) lwip_close(stack_fd(s));
-    /* The title asked for all of its sockets to go, ours and the ones it
-     * opened on the console's stack before the adapter was up. */
+    SHIM_TRACE(1, "close_all AX mask=%08x", (unsigned)m);
+    for (int s = 0; s < 32; s++) {
+        if (m & (1u << s)) {
+            SHIM_TRACE(1, "close_all fd=%d/lwfd=%d", s, stack_fd(s));
+            lwip_close(stack_fd(s));
+        }
+    }
     errno = -1;
-    return real_socketclose_all();
+    int r = real_socketclose_all();
+    SHIM_TRACE(1, "close_all native rc=%d", r);
+    return r;
 }
 
 DECL_FUNCTION(int, bind, int sockfd, const struct nsn_sockaddr *addr, socklen_t addrlen)
@@ -274,13 +289,19 @@ DECL_FUNCTION(int, bind, int sockfd, const struct nsn_sockaddr *addr, socklen_t 
     errno = 0;
     struct sockaddr_in l;
     if (!sockaddr_to_lwip(&l, addr, addrlen)) { errno = EAFNOSUPPORT; return -1; }
+    uint16_t port = nsn_ntohs(l.sin_port);
     if (native_port(l.sin_port)) {
+        SHIM_TRACE(1, "bind(fd=%d,port=%u) -> NATIVE reserved", sockfd, port);
         lwip_close(stack_fd(sockfd));
         untrack_fd(sockfd);
         errno = -1;
         return real_bind(sockfd, addr, addrlen);
     }
-    return lwip_bind(stack_fd(sockfd), (struct sockaddr *)&l, sizeof(l));
+    SHIM_TRACE(1, "bind(fd=%d/lwfd=%d,port=%u) -> AX",
+               sockfd, stack_fd(sockfd), port);
+    int r = lwip_bind(stack_fd(sockfd), (struct sockaddr *)&l, sizeof(l));
+    SHIM_TRACE(1, "bind fd=%d rc=%d errno=%d", sockfd, r, errno);
+    return r;
 }
 
 DECL_FUNCTION(int, connect, int sockfd, const struct nsn_sockaddr *addr, socklen_t addrlen)
@@ -299,9 +320,17 @@ DECL_FUNCTION(int, connect, int sockfd, const struct nsn_sockaddr *addr, socklen
 
 DECL_FUNCTION(int, listen, int sockfd, int backlog)
 {
-    if (is_foreign(sockfd)) { errno = -1; return real_listen(sockfd, backlog); }
+    if (is_foreign(sockfd)) {
+        SHIM_TRACE(1, "listen(fd=%d,backlog=%d) -> NATIVE", sockfd, backlog);
+        errno = -1;
+        return real_listen(sockfd, backlog);
+    }
     errno = 0;
-    return lwip_listen(stack_fd(sockfd), backlog);
+    SHIM_TRACE(1, "listen(fd=%d/lwfd=%d,backlog=%d) -> AX",
+               sockfd, stack_fd(sockfd), backlog);
+    int r = lwip_listen(stack_fd(sockfd), backlog);
+    SHIM_TRACE(1, "listen fd=%d rc=%d errno=%d", sockfd, r, errno);
+    return r;
 }
 
 DECL_FUNCTION(int, accept, int sockfd, struct nsn_sockaddr *addr, socklen_t *addrlen)
@@ -524,6 +553,9 @@ DECL_FUNCTION(int, getpeername, int sockfd, struct nsn_sockaddr *addr, socklen_t
 DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
               const void *optval, socklen_t optlen)
 {
+    SHIM_TRACE(1, "setsockopt(fd=%d,%s level=%d opt=0x%x len=%u)",
+               sockfd, is_foreign(sockfd) ? "NATIVE" : "AX",
+               level, optname, (unsigned)optlen);
     if (is_foreign(sockfd)) {
         errno = -1;
         return real_setsockopt(sockfd, level, optname, optval, optlen);
@@ -866,12 +898,16 @@ int nsysnet_shim_install(void)
     SHIM_PATCH(getsockname);
     SHIM_PATCH(getpeername);
     SHIM_PATCH(socketlasterr);
-    SHIM_PATCH(gethostbyname);
-    SHIM_PATCH(getaddrinfo);
-    SHIM_PATCH(freeaddrinfo);
-    SHIM_PATCH(getnameinfo);
-    SHIM_PATCH(get_h_errno);
-    SHIM_PATCH(gai_strerror);
+    if (!atomic_load(&system_dns)) {
+        SHIM_PATCH(gethostbyname);
+        SHIM_PATCH(getaddrinfo);
+        SHIM_PATCH(freeaddrinfo);
+        SHIM_PATCH(getnameinfo);
+        SHIM_PATCH(get_h_errno);
+        SHIM_PATCH(gai_strerror);
+    } else {
+        SHIM_TRACE(1, "DNS hooks skipped -> SYSTEM/Pretendo");
+    }
 
     installed = 1;
     atomic_store(&accepting_sockets, 1);

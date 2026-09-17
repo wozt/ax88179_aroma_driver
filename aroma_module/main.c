@@ -22,7 +22,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.7-restart-wait-test");
+WUMS_MODULE_VERSION("0.2.8-pretendo-coexist");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -38,6 +38,7 @@ static uint8_t wd_stack[16 * 1024] __attribute__((aligned(0x40)));
 
 static int config_keep_first = 1;
 static int config_shim_trace = 0;
+static int config_system_dns = 0;
 
 static void load_config(void)
 {
@@ -70,6 +71,11 @@ static void load_config(void)
         else if (strstr(b, "mode=keep_first"))
             config_keep_first = 1;
 
+        if (strstr(b, "dns=system"))
+            config_system_dns = 1;
+        else if (strstr(b, "dns=ax"))
+            config_system_dns = 0;
+
         int level;
         if (sscanf(b, "shim_trace=%d", &level) == 1) {
             if (level < 0) level = 0;
@@ -83,6 +89,7 @@ static void load_config(void)
     AX_LOG("CONFIG: DHCP mode = %s",
            config_keep_first ? "keep_first" : "always");
     AX_LOG("CONFIG: shim trace = %d", config_shim_trace);
+    AX_LOG("CONFIG: DNS = %s", config_system_dns ? "system" : "ax");
 }
 
 static const char *const mark_names[] = {
@@ -165,10 +172,12 @@ static int run_network(int argc, const char **argv)
 
     /* A fresh process: nothing lwIP left behind is still valid. */
     nsysnet_shim_set_trace_level(config_shim_trace);
+    nsysnet_shim_set_system_dns(config_system_dns);
     ax_net_set_session_lease_mode(config_keep_first);
-    AX_LOG("config dhcp=%s trace=%d",
+    AX_LOG("config dhcp=%s trace=%d dns=%s",
            config_keep_first ? "keep_first" : "always",
-           config_shim_trace);
+           config_shim_trace,
+           config_system_dns ? "system" : "ax");
 
     ax_net_forget();
 
