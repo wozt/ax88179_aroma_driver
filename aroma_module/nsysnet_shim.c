@@ -24,7 +24,7 @@
  * console socket, so the worst case is the Wi-Fi behaviour we had before.
  *
  * Not covered (only usable with native sockets, not shim sockets):
- * sendto_multi(_ex), recvfrom_ex/_multi, getaddrinfo_async(_rs),
+ * sendto_multi_ex, recvfrom_multi, getaddrinfo_async(_rs),
  * gethostbyaddr, netconf_*, NSSL (TLS needs a system fd), socket_lib_init/
  * finish (kept real so the untouched exports keep working).
  */
@@ -404,6 +404,57 @@ DECL_FUNCTION(int, sendto, int sockfd, const void *buf, size_t len, int flags,
                             (struct sockaddr *)&l, sizeof(l));
 }
 
+DECL_FUNCTION(int, sendto_multi,
+              int sockfd,
+              const void *buf,
+              int len,
+              int flags,
+              const struct nsn_sockaddr *destv,
+              int dest_count)
+{
+    if (is_foreign(sockfd)) {
+        SHIM_TRACE(1, "sendto_multi(fd=%d,count=%d) -> NATIVE",
+                   sockfd, dest_count);
+        errno = -1;
+        return real_sendto_multi(sockfd, buf, len, flags,
+                                 destv, dest_count);
+    }
+
+    errno = 0;
+
+    for (int i = 0; i < dest_count; i++) {
+        struct sockaddr_in l;
+
+        if (!sockaddr_to_lwip(&l, &destv[i],
+                              sizeof(struct nsn_sockaddr))) {
+            errno = EAFNOSUPPORT;
+            return -1;
+        }
+
+        int r = (int)lwip_sendto(stack_fd(sockfd),
+                                 buf,
+                                 len,
+                                 msg_flags_to_lwip(flags),
+                                 (struct sockaddr *)&l,
+                                 sizeof(l));
+
+        SHIM_TRACE(2,
+                   "sendto_multi fd=%d/lwfd=%d dst=%d/%d len=%d rc=%d errno=%d",
+                   sockfd, stack_fd(sockfd),
+                   i + 1, dest_count, len, r, errno);
+
+        if (r < 0)
+            return -1;
+
+        if (r != len) {
+            errno = EIO;
+            return -1;
+        }
+    }
+
+    return len;
+}
+
 DECL_FUNCTION(int, recv, int sockfd, void *buf, size_t len, int flags)
 {
     if (is_foreign(sockfd)) { errno = -1; return real_recv(sockfd, buf, len, flags); }
@@ -426,6 +477,59 @@ DECL_FUNCTION(int, recvfrom, int sockfd, void *buf, size_t len, int flags,
                                src_addr ? (struct sockaddr *)&l : NULL,
                                src_addr ? &llen : NULL);
     if (r >= 0 && src_addr) sockaddr_to_nsn(src_addr, addrlen, (struct sockaddr *)&l, *addrlen);
+    return r;
+}
+
+DECL_FUNCTION(int, recvfrom_ex,
+              int sockfd,
+              void *buf,
+              int len,
+              int flags,
+              struct nsn_sockaddr *src_addr,
+              socklen_t *addrlen,
+              void *extra,
+              int extra_len)
+{
+    if (is_foreign(sockfd)) {
+        SHIM_TRACE(1, "recvfrom_ex(fd=%d) -> NATIVE", sockfd);
+        errno = -1;
+        return real_recvfrom_ex(sockfd, buf, len, flags,
+                                src_addr, addrlen, extra, extra_len);
+    }
+
+    errno = 0;
+
+    if (src_addr && !addrlen) {
+        errno = EFAULT;
+        return -1;
+    }
+
+    /*
+     * Wii U extension: flag 0x40 requests the received packet TTL
+     * through the extra data byte.
+     */
+    if ((flags & 0x40) && extra && extra_len >= 1)
+        ((uint8_t *)extra)[0] = 64;
+
+    struct sockaddr_in l;
+    socklen_t llen = sizeof(l);
+
+    int r = (int)lwip_recvfrom(
+        stack_fd(sockfd),
+        buf,
+        len,
+        msg_flags_to_lwip(flags),
+        src_addr ? (struct sockaddr *)&l : NULL,
+        src_addr ? &llen : NULL);
+
+    if (r >= 0 && src_addr)
+        sockaddr_to_nsn(src_addr, addrlen,
+                        (struct sockaddr *)&l, *addrlen);
+
+    SHIM_TRACE(2,
+               "recvfrom_ex fd=%d/lwfd=%d len=%d rc=%d errno=%d",
+               sockfd, stack_fd(sockfd), len, r, errno);
+
     return r;
 }
 
@@ -962,8 +1066,10 @@ int nsysnet_shim_install(void)
     SHIM_PATCH(shutdown);
     SHIM_PATCH(send);
     SHIM_PATCH(sendto);
+    SHIM_PATCH(sendto_multi);
     SHIM_PATCH(recv);
     SHIM_PATCH(recvfrom);
+    SHIM_PATCH(recvfrom_ex);
     SHIM_PATCH(select);
     SHIM_PATCH(setsockopt);
     SHIM_PATCH(getsockopt);
