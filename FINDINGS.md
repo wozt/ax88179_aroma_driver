@@ -1,5 +1,107 @@
 # AX88179 Wii U Aroma - Current Findings
 
+## Mario Maker / Pretendo validation — NSSL bridge and SO_TCPSACK (2026-09-18)
+
+Mario Maker was used as a real-title compatibility test with:
+
+```ini
+[debug]
+shim_trace=0
+
+[compat]
+dns=system
+route=ax
+```
+
+Two independent compatibility problems were found.
+
+### NSSL cannot use an AX/lwIP-backed descriptor directly
+
+The shim exposes a real nsysnet placeholder fd to the title while the actual AX connection lives in lwIP. Mario Maker passed that public fd to `NSSLCreateConnection()`.
+
+Before the bridge was added, `NSSLCreateConnection()` returned a connection handle, but `NSSLDoHandshake()` failed with `NSSL_ERROR_IO_ERROR` because NSSL was operating on the unconnected native placeholder rather than the connected lwIP socket.
+
+The compatibility bridge now intercepts `NSSLCreateConnection()`. For an AX-owned socket it:
+
+1. obtains the connected peer using `lwip_getpeername()`;
+2. connects the reserved native placeholder fd to the same peer;
+3. removes the public fd from AX/lwIP ownership;
+4. closes the lwIP socket;
+5. calls the real `NSSLCreateConnection()` with the connected native fd.
+
+This is intentionally a hybrid path. Ordinary title TCP/UDP sockets can use the AX88179, but a connection handed to NSSL is promoted to the native Wii U network stack at the TLS boundary.
+
+After this change, Mario Maker's Pretendo discovery request completed normally:
+
+```text
+GET /v1/endpoint
+Host: discovery.olv.pretendo.cc
+
+HTTP/1.1 200 OK
+Content-Length: 300
+```
+
+The returned discovery XML contained the expected Pretendo `api.olv.pretendo.cc` endpoints.
+
+### Wii U socket-option numbers are not interchangeable with lwIP
+
+After discovery, Mario Maker created another TCP socket but closed it before calling `connect()`.
+
+Deferred tracing isolated the sequence:
+
+```text
+SO_SNDBUF  -> success
+SO_RCVBUF  -> success
+SO_TCPSACK -> failure
+socketclose()
+```
+
+On Wii U, `SOL_SOCKET / 0x0200` is `SO_TCPSACK`.
+
+In lwIP, the same numeric value `0x0200` represents `SO_REUSEPORT`, and lwIP does not expose the Wii U per-socket SACK switch through its socket API. Passing the Wii U option number directly to `lwip_setsockopt()` therefore failed.
+
+The shim now defines:
+
+```c
+#define NSN_SO_TCPSACK 0x0200
+```
+
+and handles it explicitly as a compatibility no-op rather than forwarding the numeric value to lwIP.
+
+SACK is a TCP optimization rather than a requirement for TCP correctness, so this reproduces the title-visible success behavior without accidentally enabling an unrelated lwIP option.
+
+After this fix, the socket continued normally through:
+
+```text
+socket
+setsockopt
+non-blocking connect
+NSSL promotion
+TLS handshake
+HTTPS request
+HTTPS response
+```
+
+### Validation result
+
+With both the NSSL bridge and the `SO_TCPSACK` compatibility fix in place, Mario Maker successfully:
+
+* opened Course World through Pretendo;
+* downloaded a course;
+* launched the downloaded course;
+* played the downloaded course normally.
+
+This validates the current hybrid `route=ax`, `dns=system` design for the tested Mario Maker / Pretendo workflow.
+
+### General compatibility rule
+
+Do not assume that nsysnet socket-option values are numerically compatible with lwIP.
+
+Socket options must be translated or explicitly emulated case by case. `SO_TCPSACK = 0x0200` demonstrated that the exact same numeric value can represent a completely different option in lwIP.
+
+Also avoid logging directly from title socket or NSSL hooks. Earlier testing showed that logging from timing-sensitive hooks can alter networking behavior or interfere with per-thread socket error state. Production hooks should remain silent; diagnostic information should be collected in memory and emitted later from another thread when debugging is required.
+
+
 ## Major validation — Minecraft + Pretendo through AX88179 (2026-09-18)
 
 The GAME-process `nsysnet` shim has now been validated with a real commercial Wii U title.

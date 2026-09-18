@@ -25,8 +25,9 @@
  *
  * Not covered (only usable with native sockets, not shim sockets):
  * sendto_multi_ex, recvfrom_multi, getaddrinfo_async(_rs),
- * gethostbyaddr, netconf_*, NSSL (TLS needs a system fd), socket_lib_init/
- * finish (kept real so the untouched exports keep working).
+ * gethostbyaddr, netconf_*, socket_lib_init/finish. NSSL itself still
+ * requires a system fd; NSSLCreateConnection is bridged by promoting an
+ * AX-backed socket to its reserved native placeholder at the TLS boundary.
  */
 #include "nsysnet_shim.h"
 
@@ -124,205 +125,6 @@ static atomic_int system_dns;
 static atomic_int force_native;
 static atomic_int ax_activity_pending;
 
-/*
- * NSSL probe.
- *
- * Never log from NSSLCreateConnection itself. Socket/NEX code is sensitive
- * to logging side effects, so the hook only records what happened and the
- * network worker prints it later.
- */
-static atomic_int nssl_activity_pending;
-static atomic_int nssl_last_fd;
-static atomic_int nssl_last_mapped;
-static atomic_int nssl_last_result;
-static atomic_int nssl_last_promote;
-
-/*
- * Deferred NSSL I/O probe. Never log from the title thread.
- * Keep the first few operations plus later errors.
- */
-#define NSSL_IO_SLOTS 16
-#define NSSL_IO_READ      1
-#define NSSL_IO_WRITE     2
-#define NSSL_IO_HANDSHAKE 3
-
-struct nssl_io_event {
-    atomic_int ready;
-    int op;
-    int connection;
-    int result;
-    int bytes;
-};
-
-static struct nssl_io_event nssl_io_events[NSSL_IO_SLOTS];
-static atomic_uint nssl_io_write;
-static atomic_uint nssl_io_calls;
-static unsigned nssl_io_read;
-
-/*
- * Capture the first decrypted HTTP request/response seen through NSSL.
- * 0 = empty, -1 = producer filling it, >0 = bytes ready, -2 = consumed.
- * No logging happens from the title thread.
- */
-#define NSSL_PREVIEW_MAX 1024
-
-static unsigned char nssl_write_preview[NSSL_PREVIEW_MAX];
-static unsigned char nssl_read_preview[NSSL_PREVIEW_MAX];
-
-static atomic_int nssl_write_preview_state;
-static atomic_int nssl_read_preview_state;
-
-/*
- * Deferred socket diagnostics after the first successful NSSL response.
- * Never log directly from title socket hooks.
- */
-#define NET_TRACE_SLOTS 32
-
-#define NET_TRACE_SOCKET      1
-#define NET_TRACE_CONNECT     2
-#define NET_TRACE_LASTERR     3
-#define NET_TRACE_SETSOCKOPT  4
-#define NET_TRACE_GETSOCKOPT  5
-#define NET_TRACE_CLOSE       6
-
-struct net_trace_event {
-    atomic_int ready;
-    int op;
-    int ax;
-    int fd;
-    int rc;
-    int err;
-    int port;
-    int level;
-    int optname;
-    int optlen;
-    unsigned char ip[4];
-};
-
-static struct net_trace_event net_trace_events[NET_TRACE_SLOTS];
-static atomic_uint net_trace_write;
-static unsigned net_trace_read;
-static atomic_int net_trace_enabled;
-
-static void net_trace_queue(int op,
-                            int ax,
-                            int fd,
-                            int rc,
-                            int err,
-                            const struct nsn_sockaddr *addr,
-                            socklen_t addrlen)
-{
-    if (!atomic_load(&net_trace_enabled))
-        return;
-
-    unsigned slot = atomic_fetch_add(&net_trace_write, 1);
-
-    if (slot >= NET_TRACE_SLOTS)
-        return;
-
-    struct net_trace_event *e = &net_trace_events[slot];
-
-    e->op = op;
-    e->ax = ax;
-    e->fd = fd;
-    e->rc = rc;
-    e->err = err;
-    e->port = 0;
-    e->level = 0;
-    e->optname = 0;
-    e->optlen = 0;
-
-    e->ip[0] = 0;
-    e->ip[1] = 0;
-    e->ip[2] = 0;
-    e->ip[3] = 0;
-
-    if (addr &&
-        addrlen >= sizeof(struct nsn_sockaddr_in) &&
-        addr->sa_family == NSN_AF_INET) {
-        const struct nsn_sockaddr_in *a =
-            (const struct nsn_sockaddr_in *)addr;
-
-        e->port = nsn_ntohs(a->sin_port);
-
-        memcpy(e->ip, &a->sin_addr, 4);
-    }
-
-    atomic_store_explicit(&e->ready, 1, memory_order_release);
-}
-
-static void net_trace_queue_sockopt(int op,
-                                    int ax,
-                                    int fd,
-                                    int rc,
-                                    int err,
-                                    int level,
-                                    int optname,
-                                    int optlen)
-{
-    if (!atomic_load(&net_trace_enabled))
-        return;
-
-    unsigned slot = atomic_fetch_add(&net_trace_write, 1);
-
-    if (slot >= NET_TRACE_SLOTS)
-        return;
-
-    struct net_trace_event *e = &net_trace_events[slot];
-
-    e->op = op;
-    e->ax = ax;
-    e->fd = fd;
-    e->rc = rc;
-    e->err = err;
-    e->port = 0;
-    e->level = level;
-    e->optname = optname;
-    e->optlen = optlen;
-
-    memset(e->ip, 0, sizeof(e->ip));
-
-    atomic_store_explicit(&e->ready, 1, memory_order_release);
-}
-
-int nsysnet_shim_take_net_trace(int *op,
-                                int *ax,
-                                int *fd,
-                                int *rc,
-                                int *err,
-                                int *port,
-                                int *level,
-                                int *optname,
-                                int *optlen,
-                                unsigned char ip[4])
-{
-    if (net_trace_read >= NET_TRACE_SLOTS)
-        return 0;
-
-    struct net_trace_event *e = &net_trace_events[net_trace_read];
-
-    if (!atomic_load_explicit(&e->ready, memory_order_acquire))
-        return 0;
-
-    if (op) *op = e->op;
-    if (ax) *ax = e->ax;
-    if (fd) *fd = e->fd;
-    if (rc) *rc = e->rc;
-    if (err) *err = e->err;
-    if (port) *port = e->port;
-    if (level) *level = e->level;
-    if (optname) *optname = e->optname;
-    if (optlen) *optlen = e->optlen;
-
-    if (ip)
-        memcpy(ip, e->ip, 4);
-
-    atomic_store(&e->ready, 0);
-    net_trace_read++;
-
-    return 1;
-}
-
 void nsysnet_shim_set_trace_level(int level)
 {
     atomic_store(&shim_trace_level, level);
@@ -360,30 +162,10 @@ static int shim_accepts(void) { return atomic_load(&accepting_sockets); }
 
 int nsysnet_shim_take_ax_activity(void)
 {
-    return atomic_exchange(&ax_activity_pending, 0);
-}
-
-int nsysnet_shim_take_nssl_activity(int *fd,
-                                    int *mapped,
-                                    int *promote,
-                                    int *result)
-{
-    if (!atomic_exchange(&nssl_activity_pending, 0))
-        return 0;
-
-    if (fd)
-        *fd = atomic_load(&nssl_last_fd);
-
-    if (mapped)
-        *mapped = atomic_load(&nssl_last_mapped);
-
-    if (promote)
-        *promote = atomic_load(&nssl_last_promote);
-
-    if (result)
-        *result = atomic_load(&nssl_last_result);
-
-    return 1;
+    int expected = 1;
+    return atomic_compare_exchange_strong(&ax_activity_pending,
+                                          &expected,
+                                          2);
 }
 
 static int stack_fd(int fd) { return atomic_load(&mapped_fd[fd]); }
@@ -490,18 +272,7 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
                    domain, type, protocol,
                    atomic_load(&force_native) ? " forced" : "");
         errno = -1;
-
-        int native_fd = real_socket(domain, type, protocol);
-
-        net_trace_queue(NET_TRACE_SOCKET,
-                        0,
-                        native_fd,
-                        native_fd,
-                        0,
-                        NULL,
-                        0);
-
-        return native_fd;
+        return real_socket(domain, type, protocol);
     }
     errno = 0;
     int s = lwip_socket(domain, type, protocol);
@@ -528,62 +299,32 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
     }
     track_fd(fd, s);
 
-    net_trace_queue(NET_TRACE_SOCKET,
-                    1,
-                    fd,
-                    fd,
-                    0,
-                    NULL,
-                    0);
-
-    atomic_store(&ax_activity_pending, 1);
+    int expected_activity = 0;
+    atomic_compare_exchange_strong(&ax_activity_pending,
+                                   &expected_activity,
+                                   1);
     SHIM_TRACE(1, "socket(%d,%d,%d) -> AX fd=%d lwfd=%d", domain, type, protocol, fd, s);
     return fd;
 }
 
 DECL_FUNCTION(int, socketclose, int sockfd)
 {
-    int was_ax = !is_foreign(sockfd);
-
-    if (!was_ax) {
+    if (is_foreign(sockfd)) {
         SHIM_TRACE(1, "close(fd=%d) -> NATIVE", sockfd);
-
         errno = -1;
-        int r = real_socketclose(sockfd);
-
-        net_trace_queue(NET_TRACE_CLOSE,
-                        0,
-                        sockfd,
-                        r,
-                        -1,
-                        NULL,
-                        0);
-
-        return r;
+        return real_socketclose(sockfd);
     }
 
     SHIM_TRACE(1, "close(fd=%d/lwfd=%d) -> AX",
                sockfd, stack_fd(sockfd));
 
     errno = 0;
-
     int r = lwip_close(stack_fd(sockfd));
-    int saved_errno = errno;
 
     if (r == 0) {
         untrack_fd(sockfd);
         real_socketclose(sockfd);
     }
-
-    net_trace_queue(NET_TRACE_CLOSE,
-                    1,
-                    sockfd,
-                    r,
-                    saved_errno,
-                    NULL,
-                    0);
-
-    errno = saved_errno;
 
     return r;
 }
@@ -634,20 +375,8 @@ DECL_FUNCTION(int, connect, int sockfd, const struct nsn_sockaddr *addr, socklen
 {
     if (is_foreign(sockfd)) {
         SHIM_TRACE(1, "connect(fd=%d) -> NATIVE", sockfd);
-
         errno = -1;
-
-        int r = real_connect(sockfd, addr, addrlen);
-
-        net_trace_queue(NET_TRACE_CONNECT,
-                        0,
-                        sockfd,
-                        r,
-                        -1,
-                        addr,
-                        addrlen);
-
-        return r;
+        return real_connect(sockfd, addr, addrlen);
     }
 
     SHIM_TRACE(1, "connect(fd=%d/lwfd=%d) -> AX",
@@ -659,35 +388,12 @@ DECL_FUNCTION(int, connect, int sockfd, const struct nsn_sockaddr *addr, socklen
 
     if (!sockaddr_to_lwip(&l, addr, addrlen)) {
         errno = EAFNOSUPPORT;
-
-        net_trace_queue(NET_TRACE_CONNECT,
-                        1,
-                        sockfd,
-                        -1,
-                        errno,
-                        addr,
-                        addrlen);
-
         return -1;
     }
 
-    int r = lwip_connect(stack_fd(sockfd),
-                         (struct sockaddr *)&l,
-                         sizeof(l));
-
-    int saved_errno = errno;
-
-    net_trace_queue(NET_TRACE_CONNECT,
-                    1,
-                    sockfd,
-                    r,
-                    saved_errno,
-                    addr,
-                    addrlen);
-
-    errno = saved_errno;
-
-    return r;
+    return lwip_connect(stack_fd(sockfd),
+                        (struct sockaddr *)&l,
+                        sizeof(l));
 }
 
 DECL_FUNCTION(int, listen, int sockfd, int backlog)
@@ -1040,19 +746,7 @@ DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
         SHIM_TRACE(1, "setsockopt(fd=%d,NATIVE level=%d opt=0x%x len=%u)",
                    sockfd, level, optname, (unsigned)optlen);
         errno = -1;
-
-        int r = real_setsockopt(sockfd, level, optname, optval, optlen);
-
-        net_trace_queue_sockopt(NET_TRACE_SETSOCKOPT,
-                                0,
-                                sockfd,
-                                r,
-                                -1,
-                                level,
-                                optname,
-                                (int)optlen);
-
-        return r;
+        return real_setsockopt(sockfd, level, optname, optval, optlen);
     }
 
     SHIM_TRACE(1, "setsockopt(fd=%d/lwfd=%d,AX level=%d opt=0x%x len=%u)",
@@ -1141,16 +835,6 @@ DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
     }
 
     SHIM_TRACE(1, "setsockopt fd=%d rc=%d errno=%d", sockfd, r, errno);
-
-    net_trace_queue_sockopt(NET_TRACE_SETSOCKOPT,
-                            1,
-                            sockfd,
-                            r,
-                            errno,
-                            level,
-                            optname,
-                            (int)optlen);
-
     return r;
 }
 
@@ -1215,141 +899,18 @@ DECL_FUNCTION(int, socketlasterr, void)
         result = errno_to_nsn(errno);
     }
 
-    net_trace_queue(NET_TRACE_LASTERR,
-                    0,
-                    -1,
-                    result,
-                    0,
-                    NULL,
-                    0);
-
     return result;
 }
 
 /* ------------------------------------------------------------------ */
-/* NSSL probe                                                          */
+/* NSSL bridge                                                         */
 
 /*
- * NSSL operates on native nsysnet socket descriptors.
- *
- * Our AX sockets expose a native placeholder fd to the title while the
- * actual connected socket lives inside lwIP. This probe establishes
- * whether a title hands one of those AX-backed public descriptors to
- * NSSLCreateConnection().
- *
- * Absolutely no logging is performed here.
+ * NSSL only operates on native nsysnet descriptors. AX sockets therefore
+ * stay on lwIP until a title hands one to NSSLCreateConnection(), at which
+ * point the public placeholder fd is connected natively to the same peer
+ * and becomes a normal nsysnet socket.
  */
-static void nssl_capture_preview(atomic_int *state,
-                                 unsigned char *dst,
-                                 const void *src,
-                                 int length)
-{
-    if (!src || length <= 0)
-        return;
-
-    int expected = 0;
-
-    if (!atomic_compare_exchange_strong(state, &expected, -1))
-        return;
-
-    int n = length;
-
-    if (n > NSSL_PREVIEW_MAX)
-        n = NSSL_PREVIEW_MAX;
-
-    memcpy(dst, src, (size_t)n);
-
-    /* Publish the length only after the copy is complete. */
-    atomic_store_explicit(state, n, memory_order_release);
-}
-
-static void nssl_io_queue(int op, int connection, int result, int bytes)
-{
-    unsigned call = atomic_fetch_add(&nssl_io_calls, 1);
-
-    /*
-     * Record the first NSSL_IO_SLOTS operations. We need the complete
-     * post-handshake sequence to see whether HTTPS replies actually reach
-     * the title.
-     */
-    (void)call;
-
-    unsigned slot = atomic_fetch_add(&nssl_io_write, 1);
-
-    if (slot >= NSSL_IO_SLOTS)
-        return;
-
-    struct nssl_io_event *e = &nssl_io_events[slot];
-
-    e->op = op;
-    e->connection = connection;
-    e->result = result;
-    e->bytes = bytes;
-
-    atomic_store_explicit(&e->ready, 1, memory_order_release);
-}
-
-int nsysnet_shim_take_nssl_io(int *op,
-                              int *connection,
-                              int *result,
-                              int *bytes)
-{
-    if (nssl_io_read >= NSSL_IO_SLOTS)
-        return 0;
-
-    struct nssl_io_event *e = &nssl_io_events[nssl_io_read];
-
-    if (!atomic_load_explicit(&e->ready, memory_order_acquire))
-        return 0;
-
-    if (op)
-        *op = e->op;
-    if (connection)
-        *connection = e->connection;
-    if (result)
-        *result = e->result;
-    if (bytes)
-        *bytes = e->bytes;
-
-    atomic_store(&e->ready, 0);
-    nssl_io_read++;
-
-    return 1;
-}
-
-int nsysnet_shim_take_nssl_preview(int write_side,
-                                   void *out,
-                                   int capacity)
-{
-    atomic_int *state = write_side
-        ? &nssl_write_preview_state
-        : &nssl_read_preview_state;
-
-    unsigned char *src = write_side
-        ? nssl_write_preview
-        : nssl_read_preview;
-
-    int n = atomic_load_explicit(state, memory_order_acquire);
-
-    if (n <= 0)
-        return 0;
-
-    if (!out || capacity <= 0)
-        return 0;
-
-    if (n > capacity)
-        n = capacity;
-
-    memcpy(out, src, (size_t)n);
-
-    /*
-     * Keep it consumed for the rest of this title. We only want the
-     * first request and first response for this comparison.
-     */
-    atomic_store(state, -2);
-
-    return n;
-}
 
 /*
  * Promote an AX/lwIP-backed public socket to its native nsysnet
@@ -1428,115 +989,19 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
               int32_t sockfd,
               int32_t block)
 {
-    int was_ax = !is_foreign(sockfd);
-    int promoted = 0;
+    if (!is_foreign(sockfd))
+        (void)promote_ax_socket_to_native(sockfd);
 
-    /*
-     * NSSL cannot operate on the lwIP socket hidden behind our public
-     * descriptor. Move this connection to the native placeholder before
-     * handing it to Nintendo SSL.
-     */
-    if (was_ax)
-        promoted = promote_ax_socket_to_native(sockfd);
-
-    int32_t result = real_NSSLCreateConnection(context,
-                                                host,
-                                                hostLength,
-                                                options,
-                                                sockfd,
-                                                block);
-
-    if (shim_accepts()) {
-        atomic_store(&nssl_last_fd, sockfd);
-        atomic_store(&nssl_last_mapped, was_ax ? 1 : 0);
-        atomic_store(&nssl_last_promote, promoted);
-        atomic_store(&nssl_last_result, result);
-
-        /*
-         * Publish this last. The worker only reads the other fields after
-         * observing this flag.
-         */
-        atomic_store(&nssl_activity_pending, 1);
-    }
-
-    return result;
-}
-
-DECL_FUNCTION(int32_t, NSSLDoHandshake,
-              int32_t connection)
-{
-    int32_t result = real_NSSLDoHandshake(connection);
-
-    nssl_io_queue(NSSL_IO_HANDSHAKE,
-                  connection,
-                  result,
-                  0);
-
-    return result;
-}
-
-DECL_FUNCTION(int32_t, NSSLRead,
-              int32_t connection,
-              void *buffer,
-              int32_t length,
-              int32_t *outBytesRead)
-{
-    int32_t result = real_NSSLRead(connection,
-                                   buffer,
-                                   length,
-                                   outBytesRead);
-
-    int bytes = outBytesRead ? *outBytesRead : -1;
-
-    if (result == 0 && bytes > 0) {
-        nssl_capture_preview(&nssl_read_preview_state,
-                             nssl_read_preview,
-                             buffer,
-                             bytes);
-
-        /*
-         * Everything interesting for Mario Maker happens immediately
-         * after discovery. Start deferred socket tracing now.
-         */
-        atomic_store(&net_trace_enabled, 1);
-    }
-
-    nssl_io_queue(NSSL_IO_READ,
-                  connection,
-                  result,
-                  bytes);
-
-    return result;
-}
-
-DECL_FUNCTION(int32_t, NSSLWrite,
-              int32_t connection,
-              const void *buffer,
-              int32_t length,
-              int32_t *outBytesWritten)
-{
-    int32_t result = real_NSSLWrite(connection,
-                                    buffer,
-                                    length,
-                                    outBytesWritten);
-
-    int bytes = outBytesWritten ? *outBytesWritten : -1;
-
-    if (result == 0 && bytes > 0)
-        nssl_capture_preview(&nssl_write_preview_state,
-                             nssl_write_preview,
-                             buffer,
-                             bytes);
-
-    nssl_io_queue(NSSL_IO_WRITE,
-                  connection,
-                  result,
-                  bytes);
-
-    return result;
+    return real_NSSLCreateConnection(context,
+                                     host,
+                                     hostLength,
+                                     options,
+                                     sockfd,
+                                     block);
 }
 
 /* ------------------------------------------------------------------ */
+/* DNS                                                                 */
 /* DNS                                                                 */
 
 DECL_FUNCTION(struct hostent *, gethostbyname, const char *name)
@@ -1812,13 +1277,10 @@ int nsysnet_shim_install(void)
     SHIM_PATCH(socketlasterr);
 
     /*
-     * Probe NSSL even when DNS remains native. This hook is currently
-     * observational only and always calls the original implementation.
+     * NSSL requires a native descriptor. Promote AX-backed sockets to
+     * their reserved nsysnet placeholder at the TLS boundary.
      */
     SHIM_PATCH(NSSLCreateConnection);
-    SHIM_PATCH(NSSLDoHandshake);
-    SHIM_PATCH(NSSLRead);
-    SHIM_PATCH(NSSLWrite);
 
     if (!atomic_load(&system_dns)) {
         SHIM_PATCH(gethostbyname);
@@ -1851,29 +1313,6 @@ void nsysnet_shim_begin_title(void) {
     atomic_store(&probe_thread, 0);
     atomic_store(&open_mask, 0);
     atomic_store(&ax_activity_pending, 0);
-
-    atomic_store(&nssl_activity_pending, 0);
-    atomic_store(&nssl_last_fd, -1);
-    atomic_store(&nssl_last_mapped, 0);
-    atomic_store(&nssl_last_promote, 0);
-    atomic_store(&nssl_last_result, 0);
-
-    atomic_store(&nssl_io_write, 0);
-    atomic_store(&nssl_io_calls, 0);
-    nssl_io_read = 0;
-
-    atomic_store(&nssl_write_preview_state, 0);
-    atomic_store(&nssl_read_preview_state, 0);
-
-    atomic_store(&net_trace_enabled, 0);
-    atomic_store(&net_trace_write, 0);
-    net_trace_read = 0;
-
-    for (int i = 0; i < NET_TRACE_SLOTS; i++)
-        atomic_store(&net_trace_events[i].ready, 0);
-
-    for (int i = 0; i < NSSL_IO_SLOTS; i++)
-        atomic_store(&nssl_io_events[i].ready, 0);
 
     for (int i=0; i<AI_OWNED_MAX; ++i) atomic_store(&ai_owned[i], NULL);
 }
