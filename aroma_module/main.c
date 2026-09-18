@@ -309,14 +309,17 @@ static int run_network(int argc, const char **argv)
         {
             int nssl_fd;
             int nssl_mapped;
+            int nssl_promote;
             int nssl_result;
 
             if (nsysnet_shim_take_nssl_activity(&nssl_fd,
                                                  &nssl_mapped,
+                                                 &nssl_promote,
                                                  &nssl_result)) {
-                AX_LOG("NSSLCreateConnection fd=%d socket=%s rc=%d",
+                AX_LOG("NSSLCreateConnection fd=%d socket=%s promote=%d rc=%d",
                        nssl_fd,
                        nssl_mapped ? "AX" : "NATIVE",
+                       nssl_promote,
                        nssl_result);
             }
         }

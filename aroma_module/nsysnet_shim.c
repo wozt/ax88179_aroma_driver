@@ -134,6 +134,7 @@ static atomic_int nssl_activity_pending;
 static atomic_int nssl_last_fd;
 static atomic_int nssl_last_mapped;
 static atomic_int nssl_last_result;
+static atomic_int nssl_last_promote;
 
 /*
  * Deferred NSSL I/O probe. Never log from the title thread.
@@ -197,7 +198,10 @@ int nsysnet_shim_take_ax_activity(void)
     return atomic_exchange(&ax_activity_pending, 0);
 }
 
-int nsysnet_shim_take_nssl_activity(int *fd, int *mapped, int *result)
+int nsysnet_shim_take_nssl_activity(int *fd,
+                                    int *mapped,
+                                    int *promote,
+                                    int *result)
 {
     if (!atomic_exchange(&nssl_activity_pending, 0))
         return 0;
@@ -207,6 +211,9 @@ int nsysnet_shim_take_nssl_activity(int *fd, int *mapped, int *result)
 
     if (mapped)
         *mapped = atomic_load(&nssl_last_mapped);
+
+    if (promote)
+        *promote = atomic_load(&nssl_last_promote);
 
     if (result)
         *result = atomic_load(&nssl_last_result);
@@ -969,6 +976,75 @@ int nsysnet_shim_take_nssl_io(int *op,
     return 1;
 }
 
+/*
+ * Promote an AX/lwIP-backed public socket to its native nsysnet
+ * placeholder.
+ *
+ * The placeholder was created with the same socket type/protocol as the
+ * lwIP socket. For NSSL we connect that native socket to the same peer,
+ * then retire the lwIP side and make the public fd native permanently.
+ *
+ * Returns:
+ *   1    promoted successfully
+ *  -1    lwIP peer unavailable
+ *  -2    unsupported peer address
+ *  -100-N  native connect failed, where N is nsysnet socketlasterr()
+ */
+static int promote_ax_socket_to_native(int sockfd)
+{
+    if (is_foreign(sockfd))
+        return 0;
+
+    int lwfd = stack_fd(sockfd);
+
+    struct sockaddr_in peer;
+    socklen_t peer_len = sizeof(peer);
+    memset(&peer, 0, sizeof(peer));
+
+    if (lwip_getpeername(lwfd,
+                         (struct sockaddr *)&peer,
+                         &peer_len) != 0)
+        return -1;
+
+    if (peer.sin_family != AF_INET)
+        return -2;
+
+    struct nsn_sockaddr_in native_peer;
+    memset(&native_peer, 0, sizeof(native_peer));
+
+    native_peer.sin_family = NSN_AF_INET;
+    native_peer.sin_port = peer.sin_port;
+    native_peer.sin_addr = peer.sin_addr.s_addr;
+
+    /*
+     * The native placeholder has never been connected. Connect it now
+     * while the AX socket is still alive, so failure leaves the old path
+     * untouched.
+     */
+    errno = -1;
+
+    int rc = real_connect(sockfd,
+                          (const struct nsn_sockaddr *)&native_peer,
+                          sizeof(native_peer));
+
+    if (rc != 0) {
+        int native_error = real_socketlasterr();
+        return -100 - native_error;
+    }
+
+    /*
+     * Native connection succeeded. From this point the public fd belongs
+     * to nsysnet. Clear ownership before closing lwIP so any concurrent
+     * socket operation sees the new native path.
+     */
+    untrack_fd(sockfd);
+    atomic_store(&mapped_fd[sockfd], -1);
+
+    lwip_close(lwfd);
+
+    return 1;
+}
+
 DECL_FUNCTION(int32_t, NSSLCreateConnection,
               int32_t context,
               const char *host,
@@ -978,6 +1054,15 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
               int32_t block)
 {
     int was_ax = !is_foreign(sockfd);
+    int promoted = 0;
+
+    /*
+     * NSSL cannot operate on the lwIP socket hidden behind our public
+     * descriptor. Move this connection to the native placeholder before
+     * handing it to Nintendo SSL.
+     */
+    if (was_ax)
+        promoted = promote_ax_socket_to_native(sockfd);
 
     int32_t result = real_NSSLCreateConnection(context,
                                                 host,
@@ -989,6 +1074,7 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
     if (shim_accepts()) {
         atomic_store(&nssl_last_fd, sockfd);
         atomic_store(&nssl_last_mapped, was_ax ? 1 : 0);
+        atomic_store(&nssl_last_promote, promoted);
         atomic_store(&nssl_last_result, result);
 
         /*
@@ -1375,6 +1461,7 @@ void nsysnet_shim_begin_title(void) {
     atomic_store(&nssl_activity_pending, 0);
     atomic_store(&nssl_last_fd, -1);
     atomic_store(&nssl_last_mapped, 0);
+    atomic_store(&nssl_last_promote, 0);
     atomic_store(&nssl_last_result, 0);
 
     atomic_store(&nssl_io_write, 0);
