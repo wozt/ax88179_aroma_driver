@@ -9,25 +9,30 @@
 [✓] select
 [✓] nonblocking
 [✓] errno / SO_ERROR
-[✓] socket-option translation principale
-[✓] multicast TTL / LOOP
+[✓] socket option translation principale
+[✓] SNDBUF / RCVBUF ABI mesurée
+[✓] IP_MULTICAST_TTL
+[✓] IP_MULTICAST_LOOP
+[✓] IP_MULTICAST_IF
+[✓] IP_ADD_MEMBERSHIP
+[✓] IP_DROP_MEMBERSHIP
+[✓] réception multicast réelle
+[✓] émission multicast réelle
 
-[ ] SNDBUF / RCVBUF ABI exacte
-[ ] IP_MULTICAST_IF
-[ ] IP_ADD_MEMBERSHIP / DROP_MEMBERSHIP
-[ ] réception multicast réelle
-[ ] TCP listen / accept fonctionnel réel
+[ ] limites négatives exactes SNDBUF/RCVBUF
+[ ] comportement réel SNDBUF / backpressure
+[ ] TCP listen / accept réel
 [ ] sendto_multi_ex
 [ ] recvfrom_multi
-[ ] recvfrom_ex TTL réel au lieu du placeholder 64
+[ ] recvfrom_ex avec vrai TTL
 [ ] gethostbyaddr
-[ ] getaddrinfo_async / _rs
-[ ] NSSL : état/options conservés pendant promotion
+[ ] DNS async / variantes restantes
+[ ] NSSL : état/options pendant promotion
 [ ] hot-unplug / reconnect
-[ ] perte/restauration du link
-[ ] renouvellement / perte DHCP
-[ ] exhaustion sockets / buffers
-[ ] tests charge et concurrence
+[ ] perte/restauration link
+[ ] DHCP renew/recovery
+[ ] exhaustion sockets/buffers
+[ ] charge/concurrence
 
 ## Mario Maker / Pretendo validation — NSSL bridge and SO_TCPSACK (2026-09-18)
 
