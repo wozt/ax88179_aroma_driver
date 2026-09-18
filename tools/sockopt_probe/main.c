@@ -212,14 +212,25 @@ static void run_u8_test(const char *name, int opt, unsigned set_value)
 static void run_buffer_matrix(const char *name, int opt)
 {
     static const int sizes[] = {
+        -1,
+        0,
+        1,
+        2,
+        255,
+        256,
+        511,
+        512,
+        1023,
         1024,
         4096,
         8192,
         16384,
         32767,
         32768,
+        65534,
         65535,
-        65536
+        65536,
+        65537
     };
 
     probe_say("--- %s matrix ---", name);
