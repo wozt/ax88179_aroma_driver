@@ -24,7 +24,7 @@
  * console socket, so the worst case is the Wi-Fi behaviour we had before.
  *
  * Not covered (only usable with native sockets, not shim sockets):
- * sendto_multi_ex, recvfrom_multi, getaddrinfo_async(_rs),
+ * getaddrinfo_async(_rs),
  * gethostbyaddr, netconf_*, socket_lib_init/finish. NSSL itself still
  * requires a system fd; NSSLCreateConnection is bridged by promoting an
  * AX-backed socket to its reserved native placeholder at the TLS boundary.
@@ -67,6 +67,28 @@ struct nsn_addrinfo {   /* wut order: canonname BEFORE addr (lwIP swaps) */
     struct nsn_sockaddr *ai_addr;
     struct nsn_addrinfo *ai_next;
 };
+
+struct nsn_recvfrom_multi_buffers {
+    void *buffer;
+    unsigned int bufferlen;
+    struct nsn_sockaddr *froms;
+    unsigned int fromslen;
+    int *results;
+    unsigned int resultslen;
+};
+
+struct nsn_sendto_multi_ex_buffers {
+    void *buffer;
+    unsigned int bufferlen;
+    int *datagram_lens;
+    unsigned int datagram_lens_len;
+    struct nsn_sockaddr *dests;
+    unsigned int destslen;
+    int *results;
+    unsigned int resultslen;
+};
+
+#define NSN_IPC_ALIGN 0x40u
 
 #define NSN_AF_INET      2
 #define NSN_SOL_SOCKET   (-1)
@@ -142,6 +164,18 @@ struct nsn_addrinfo {   /* wut order: canonname BEFORE addr (lwIP swaps) */
 extern int h_errno;
 
 static uint16_t nsn_ntohs(uint16_t v) { return lwip_ntohs(v); }
+
+
+static int nsn_ipc_ptr_ok(const void *p)
+{
+    return p && (((uintptr_t)p & (NSN_IPC_ALIGN - 1u)) == 0);
+}
+
+static uint32_t nsn_ipc_pad(uint32_t size)
+{
+    return (size + (NSN_IPC_ALIGN - 1u)) &
+           ~(NSN_IPC_ALIGN - 1u);
+}
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
@@ -716,6 +750,122 @@ DECL_FUNCTION(int, sendto_multi,
     return len;
 }
 
+
+DECL_FUNCTION(int, sendto_multi_ex,
+              int sockfd,
+              int flags,
+              struct nsn_sendto_multi_ex_buffers *b,
+              int count)
+{
+    if (is_foreign(sockfd)) {
+        errno = -1;
+        return real_sendto_multi_ex(sockfd, flags, b, count);
+    }
+
+    errno = 0;
+
+    if (!b || count < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (count == 0)
+        return 0;
+
+    if (!nsn_ipc_ptr_ok(b) ||
+        !nsn_ipc_ptr_ok(b->buffer) ||
+        !nsn_ipc_ptr_ok(b->datagram_lens) ||
+        !nsn_ipc_ptr_ok(b->dests) ||
+        !nsn_ipc_ptr_ok(b->results)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((b->bufferlen & 0x3f) ||
+        (b->datagram_lens_len & 0x3f) ||
+        (b->destslen & 0x3f) ||
+        (b->resultslen & 0x3f)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint64_t total_required = 0;
+
+    for (int i = 0; i < count; i++) {
+        if (b->datagram_lens[i] < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        total_required += (uint32_t)b->datagram_lens[i];
+
+        if (total_required > UINT32_MAX) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+
+    uint32_t data_required =
+        nsn_ipc_pad((uint32_t)total_required);
+
+    uint32_t lens_required =
+        nsn_ipc_pad((uint32_t)count * sizeof(int));
+
+    uint32_t dests_required =
+        nsn_ipc_pad((uint32_t)count *
+                    sizeof(struct nsn_sockaddr));
+
+    uint32_t results_required =
+        nsn_ipc_pad((uint32_t)count * sizeof(int));
+
+    if (b->bufferlen < data_required ||
+        b->datagram_lens_len < lens_required ||
+        b->destslen < dests_required ||
+        b->resultslen < results_required) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    for (int i = 0; i < count; i++)
+        b->results[i] = 0;
+
+    uint8_t *data = b->buffer;
+    int total = 0;
+
+    for (int i = 0; i < count; i++) {
+        int len = b->datagram_lens[i];
+
+        struct sockaddr_in dest;
+
+        if (!sockaddr_to_lwip(
+                &dest,
+                &b->dests[i],
+                sizeof(struct nsn_sockaddr))) {
+            b->results[i] = -1;
+            errno = EAFNOSUPPORT;
+            return -1;
+        }
+
+        int rc = (int)lwip_sendto(
+            stack_fd(sockfd),
+            data,
+            len,
+            msg_flags_to_lwip(flags),
+            (struct sockaddr *)&dest,
+            sizeof(dest));
+
+        b->results[i] = rc;
+
+        if (rc < 0)
+            return -1;
+
+        total += rc;
+        data += len;
+    }
+
+    return total;
+}
+
 DECL_FUNCTION(int, recv, int sockfd, void *buf, size_t len, int flags)
 {
     if (is_foreign(sockfd)) { errno = -1; return real_recv(sockfd, buf, len, flags); }
@@ -789,6 +939,183 @@ DECL_FUNCTION(int, recvfrom_ex,
     }
 
     return r;
+}
+
+
+DECL_FUNCTION(int, recvfrom_multi,
+              int sockfd,
+              int flags,
+              struct nsn_recvfrom_multi_buffers *b,
+              int datagram_len,
+              int count,
+              struct nsn_timeval *timeout)
+{
+    if (is_foreign(sockfd)) {
+        errno = -1;
+        return real_recvfrom_multi(
+            sockfd,
+            flags,
+            b,
+            datagram_len,
+            count,
+            timeout);
+    }
+
+    errno = 0;
+
+    if (!b || datagram_len < 0 || count < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (timeout &&
+        (timeout->tv_sec < 0 ||
+         timeout->tv_usec < 0 ||
+         timeout->tv_usec >= 1000000)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (count == 0)
+        return 0;
+
+    if (!nsn_ipc_ptr_ok(b) ||
+        !nsn_ipc_ptr_ok(b->buffer) ||
+        !nsn_ipc_ptr_ok(b->froms) ||
+        !nsn_ipc_ptr_ok(b->results)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((b->bufferlen & 0x3f) ||
+        (b->fromslen & 0x3f) ||
+        (b->resultslen & 0x3f)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint64_t data_bytes =
+        (uint64_t)(uint32_t)datagram_len *
+        (uint64_t)(uint32_t)count;
+
+    if (data_bytes > UINT32_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    uint32_t data_required =
+        nsn_ipc_pad((uint32_t)data_bytes);
+
+    uint32_t froms_required =
+        nsn_ipc_pad((uint32_t)count *
+                    sizeof(struct nsn_sockaddr));
+
+    uint32_t results_required =
+        nsn_ipc_pad((uint32_t)count * sizeof(int));
+
+    if (b->bufferlen < data_required ||
+        b->fromslen < froms_required ||
+        b->resultslen < results_required) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    for (int i = 0; i < count; i++)
+        b->results[i] = 0;
+
+    OSTime deadline = 0;
+
+    if (timeout) {
+        uint64_t timeout_us =
+            (uint64_t)timeout->tv_sec * 1000000ULL +
+            (uint64_t)timeout->tv_usec;
+
+        deadline =
+            OSGetTime() +
+            (OSTime)OSMicrosecondsToTicks(timeout_us);
+    }
+
+    int lwfd = stack_fd(sockfd);
+
+    for (int i = 0; i < count; i++) {
+        if (timeout) {
+            OSTime now = OSGetTime();
+
+            if (now >= deadline) {
+                b->results[i] = -1;
+                errno = 0;
+                return i;
+            }
+
+            uint64_t remaining_us =
+                OSTicksToMicroseconds(deadline - now);
+
+            struct timeval tv;
+            tv.tv_sec =
+                (long)(remaining_us / 1000000ULL);
+            tv.tv_usec =
+                (long)(remaining_us % 1000000ULL);
+
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(lwfd, &rfds);
+
+            int ready = lwip_select(
+                lwfd + 1,
+                &rfds,
+                NULL,
+                NULL,
+                &tv);
+
+            if (ready == 0) {
+                b->results[i] = -1;
+                errno = 0;
+                return i;
+            }
+
+            if (ready < 0) {
+                b->results[i] = -1;
+                return i == 0 ? -1 : i;
+            }
+        }
+
+        struct sockaddr_in from;
+        socklen_t fromlen = sizeof(from);
+
+        uint8_t *slot =
+            (uint8_t *)b->buffer +
+            ((size_t)i * (size_t)datagram_len);
+
+        int rc = (int)lwip_recvfrom(
+            lwfd,
+            slot,
+            datagram_len,
+            msg_flags_to_lwip(flags),
+            (struct sockaddr *)&from,
+            &fromlen);
+
+        b->results[i] = rc;
+
+        if (rc < 0) {
+            if (errno == EWOULDBLOCK ||
+                errno == EAGAIN) {
+                errno = 0;
+                return i;
+            }
+
+            return i == 0 ? -1 : i;
+        }
+
+        socklen_t cap = sizeof(struct nsn_sockaddr);
+
+        sockaddr_to_nsn(
+            &b->froms[i],
+            &cap,
+            (struct sockaddr *)&from,
+            sizeof(struct nsn_sockaddr));
+    }
+
+    return count;
 }
 
 /* One pass of lwIP's select over the bits in `want`, with an immediate
@@ -1803,9 +2130,11 @@ int nsysnet_shim_install(void)
     SHIM_PATCH(send);
     SHIM_PATCH(sendto);
     SHIM_PATCH(sendto_multi);
+    SHIM_PATCH(sendto_multi_ex);
     SHIM_PATCH(recv);
     SHIM_PATCH(recvfrom);
     SHIM_PATCH(recvfrom_ex);
+    SHIM_PATCH(recvfrom_multi);
     SHIM_PATCH(select);
     SHIM_PATCH(setsockopt);
     SHIM_PATCH(getsockopt);

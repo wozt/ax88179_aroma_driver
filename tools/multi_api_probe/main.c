@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <wut_rplwrap.h>
 
 #include "probe.h"
 
@@ -78,6 +79,31 @@ typedef int (*sendto_multi_ex_fn)(
     int send_datagram_count);
 
 typedef int (*socketlasterr_fn)(void);
+
+
+extern int RPLWRAP(sendto_multi)(
+    int socket,
+    const void *buffer,
+    int len,
+    int flags,
+    const struct sockaddr *dest_addrs,
+    int dest_count);
+
+extern int RPLWRAP(sendto_multi_ex)(
+    int socket,
+    int flags,
+    struct ax_sendto_multi_ex_buffers *buffs,
+    int send_datagram_count);
+
+extern int RPLWRAP(recvfrom_multi)(
+    int socket,
+    int flags,
+    struct ax_recvfrom_multi_buffers *buffs,
+    int recv_datagram_len,
+    int recv_datagram_count,
+    struct ax_nsysnet_timeval *timeout);
+
+extern int RPLWRAP(socketlasterr)(void);
 
 /*
  * socket() de WUT renvoie un fd POSIX/devoptab.
@@ -289,7 +315,7 @@ static void test_sendto_multi_ex(void)
 
     errno = 0;
 
-    int base_rc = p_sendto_multi(
+    int base_rc = RPLWRAP(sendto_multi)(
         nsfd,
         base,
         sizeof(base) - 1,
@@ -298,7 +324,7 @@ static void test_sendto_multi_ex(void)
         2);
 
     int base_nerr =
-        base_rc < 0 ? p_socketlasterr() : 0;
+        base_rc < 0 ? RPLWRAP(socketlasterr)() : 0;
 
     probe_say(
         "sendto_multi baseline rc=%d nsysnet_err=%d",
@@ -379,14 +405,14 @@ static void test_sendto_multi_ex(void)
                     b.results = results;
                     b.resultslen = intlens[ri];
 
-                    int rc = p_sendto_multi_ex(
+                    int rc = RPLWRAP(sendto_multi_ex)(
                         nsfd,
                         0,
                         &b,
                         2);
 
                     int nerr =
-                        rc < 0 ? p_socketlasterr() : 0;
+                        rc < 0 ? RPLWRAP(socketlasterr)() : 0;
 
                     /*
                      * Do not spam all 81 EINVAL cases.
@@ -533,7 +559,7 @@ static void test_recvfrom_multi(void)
 
     errno = 0;
 
-    int rc = p_recvfrom_multi(nsfd,
+    int rc = RPLWRAP(recvfrom_multi)(nsfd,
                               0,
                               &b,
                               64,
@@ -541,7 +567,7 @@ static void test_recvfrom_multi(void)
                               &timeout);
 
     int err = errno;
-    int nerr = rc < 0 ? p_socketlasterr() : 0;
+    int nerr = rc < 0 ? RPLWRAP(socketlasterr)() : 0;
 
     probe_say(
         "recvfrom_multi rc=%d errno=%d nsysnet_err=%d",
