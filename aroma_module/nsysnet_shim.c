@@ -176,6 +176,9 @@ struct compat_sock_state {
 
     atomic_int linger_on;
     atomic_int linger_secs;
+
+    atomic_int sndbuf;
+    atomic_int rcvbuf;
 };
 
 static struct compat_sock_state compat_sock[32];
@@ -194,6 +197,9 @@ static void compat_state_reset(int fd)
 
     atomic_store(&compat_sock[fd].linger_on, 0);
     atomic_store(&compat_sock[fd].linger_secs, 0);
+
+    atomic_store(&compat_sock[fd].sndbuf, 8192);
+    atomic_store(&compat_sock[fd].rcvbuf, 8192);
 }
 
 static void compat_state_reset_all(void)
@@ -360,7 +366,6 @@ static int socket_opt_to_lwip(int opt)
     case NSN_SO_REUSEADDR: return SO_REUSEADDR;
     case NSN_SO_KEEPALIVE: return SO_KEEPALIVE;
     case NSN_SO_BROADCAST: return SO_BROADCAST;
-    case NSN_SO_RCVBUF:    return SO_RCVBUF;
     case NSN_SO_ERROR:     return SO_ERROR;
     case NSN_SO_TYPE:      return SO_TYPE;
     default:               return -1;
@@ -450,6 +455,17 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
         s = lwip_socket(domain, type & 0xF, protocol);
     }
     if (s >= 0) {
+        /*
+         * Fresh native Wii U sockets report SO_RCVBUF=8192.
+         * Match the real lwIP receive queue to that default.
+         */
+        int native_rcvbuf = 8192;
+        lwip_setsockopt(s,
+                        SOL_SOCKET,
+                        SO_RCVBUF,
+                        &native_rcvbuf,
+                        sizeof(native_rcvbuf));
+
         /* lwIP refuses broadcast sends without SO_BROADCAST, nsysnet does
          * not -- and whb's UDP logger never sets it. Allow it upfront or
          * every broadcast sendto (logs, LAN discovery) silently fails. */
@@ -964,12 +980,56 @@ DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
             return compat_set_int(optval, optlen);
 
         /*
-         * lwIP has no per-socket send-buffer sizing. Keep the existing
-         * compatibility behaviour for now; buffer-size limits are audited
-         * separately because native nsysnet rejects some requested sizes.
+         * Native behaviour measured on Wii U:
+         *   fresh socket -> 8192
+         *   -1 and 0..65535 -> accepted
+         *   >=65536 -> EINVAL
+         *
+         * lwIP has no true per-socket TCP send-buffer setter, so this is
+         * title-visible ABI state. Real send backpressure is tested
+         * separately.
          */
-        case NSN_SO_SNDBUF:
-            return compat_set_int(optval, optlen);
+        case NSN_SO_SNDBUF: {
+            if (compat_set_int(optval, optlen) != 0)
+                return -1;
+
+            int value = *(const int *)optval;
+
+            if (value > 65535) {
+                errno = EINVAL;
+                return -1;
+            }
+
+            atomic_store(&compat_sock[sockfd].sndbuf, value);
+            return 0;
+        }
+
+        /*
+         * lwIP does have a real receive-buffer limit. Enforce the Wii U
+         * range first, then apply it to lwIP and mirror the visible value.
+         */
+        case NSN_SO_RCVBUF: {
+            if (compat_set_int(optval, optlen) != 0)
+                return -1;
+
+            int value = *(const int *)optval;
+
+            if (value > 65535) {
+                errno = EINVAL;
+                return -1;
+            }
+
+            int r = lwip_setsockopt(stack_fd(sockfd),
+                                    SOL_SOCKET,
+                                    SO_RCVBUF,
+                                    &value,
+                                    sizeof(value));
+
+            if (r == 0)
+                atomic_store(&compat_sock[sockfd].rcvbuf, value);
+
+            return r;
+        }
 
         /*
          * Native Wii U rejects attempts to set these low-water marks,
@@ -1216,9 +1276,16 @@ DECL_FUNCTION(int, getsockopt, int sockfd, int level, int optname,
             return 0;
 
         case NSN_SO_SNDBUF:
-            return compat_get_int(optval,
-                                  optlen,
-                                  TCP_SND_BUF);
+            return compat_get_int(
+                optval,
+                optlen,
+                atomic_load(&compat_sock[sockfd].sndbuf));
+
+        case NSN_SO_RCVBUF:
+            return compat_get_int(
+                optval,
+                optlen,
+                atomic_load(&compat_sock[sockfd].rcvbuf));
 
         case NSN_SO_SNDLOWAT:
         case NSN_SO_RCVLOWAT:
