@@ -55,13 +55,16 @@ static int current_using_cached_lease;
 static uint32_t stat_rx_ok, stat_rx_err, stat_tx_q, stat_tx_drop, stat_tx_ok, stat_tx_err;
 static uint32_t stat_in_ok, stat_in_drop, stat_beats, stat_rx_idle;
 
-#define WIRETRACE_SLOTS 32
+#define WIRETRACE_SLOTS 64
+#define WIRETRACE_PORT 59941
 
 struct wiretrace_event {
     uint32_t src_ip;
     uint16_t src_port;
     uint16_t dst_port;
-    uint32_t type;
+    uint16_t payload_len;
+    uint16_t frame_len;
+    uint32_t word0;
     uint32_t word1;
     uint32_t word2;
     uint32_t word3;
@@ -84,7 +87,14 @@ static uint32_t wire_be32(const uint8_t *p)
            p[3];
 }
 
-static void wiretrace_udp16(const uint8_t *frame, int len)
+/*
+ * Observe every incoming UDP datagram addressed to Minecraft/NEX port
+ * 59941 before lwIP sees it.
+ *
+ * No logging is done here: this runs in the RX path. Events are printed
+ * later by ax_net_wire_trace_drain().
+ */
+static void wiretrace_udp_59941(const uint8_t *frame, int len)
 {
     if (!frame || len < 14)
         return;
@@ -92,7 +102,6 @@ static void wiretrace_udp16(const uint8_t *frame, int len)
     int l2 = 14;
     uint16_t ethertype = wire_be16(frame + 12);
 
-    /* Handle one 802.1Q VLAN tag too, just in case. */
     if (ethertype == 0x8100 && len >= 18) {
         ethertype = wire_be16(frame + 16);
         l2 = 18;
@@ -115,28 +124,36 @@ static void wiretrace_udp16(const uint8_t *frame, int len)
         return;
 
     const uint8_t *udp = ip + ihl;
-    uint16_t udp_len = wire_be16(udp + 4);
 
-    /* UDP header 8 + NNCS message 16. */
-    if (udp_len != 24 || len < l2 + ihl + udp_len)
+    uint16_t src_port = wire_be16(udp + 0);
+    uint16_t dst_port = wire_be16(udp + 2);
+    uint16_t udp_len  = wire_be16(udp + 4);
+
+    if (dst_port != WIRETRACE_PORT)
+        return;
+
+    if (udp_len < 8 || len < l2 + ihl + udp_len)
         return;
 
     const uint8_t *data = udp + 8;
+    unsigned payload_len = udp_len - 8;
 
-    /* Keep the newest events if the reader falls behind. */
     if (wiretrace_write - wiretrace_read >= WIRETRACE_SLOTS)
         wiretrace_read++;
 
     struct wiretrace_event *e =
         &wiretrace[wiretrace_write % WIRETRACE_SLOTS];
 
-    e->src_ip   = wire_be32(ip + 12);
-    e->src_port = wire_be16(udp + 0);
-    e->dst_port = wire_be16(udp + 2);
-    e->type     = wire_be32(data + 0);
-    e->word1    = wire_be32(data + 4);
-    e->word2    = wire_be32(data + 8);
-    e->word3    = wire_be32(data + 12);
+    e->src_ip = wire_be32(ip + 12);
+    e->src_port = src_port;
+    e->dst_port = dst_port;
+    e->payload_len = payload_len;
+    e->frame_len = len;
+
+    e->word0 = payload_len >= 4  ? wire_be32(data + 0)  : 0;
+    e->word1 = payload_len >= 8  ? wire_be32(data + 4)  : 0;
+    e->word2 = payload_len >= 12 ? wire_be32(data + 8)  : 0;
+    e->word3 = payload_len >= 16 ? wire_be32(data + 12) : 0;
 
     wiretrace_write++;
 }
@@ -150,15 +167,17 @@ void ax_net_wire_trace_drain(void)
         uint32_t ip = e->src_ip;
 
         WHBLogPrintf(
-            "AXWIRE: UDP16 <- %u.%u.%u.%u:%u -> local:%u "
-            "type=%u word1=%u word2=%08x word3=%08x",
+            "AXWIRE: UDP <- %u.%u.%u.%u:%u -> local:%u "
+            "bytes=%u frame=%u first=%08x %08x %08x %08x",
             (ip >> 24) & 255,
             (ip >> 16) & 255,
             (ip >> 8) & 255,
             ip & 255,
             e->src_port,
             e->dst_port,
-            e->type,
+            e->payload_len,
+            e->frame_len,
+            e->word0,
             e->word1,
             e->word2,
             e->word3);
@@ -367,9 +386,9 @@ int ax_net_poll(void)
     else if (n < 0) stat_rx_err++;
     else stat_rx_idle++;
     if (n > 0) {
-        /* Observe NNCS UDP packets before lwIP gets a chance to accept
-         * or discard them. No logging is done here. */
-        wiretrace_udp16(rx_frame, n);
+        /* Observe all UDP traffic addressed to the NEX gameplay port
+         * before lwIP gets a chance to accept or discard it. */
+        wiretrace_udp_59941(rx_frame, n);
 
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)n, PBUF_POOL);
         if (p) {
