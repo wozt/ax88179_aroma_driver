@@ -108,6 +108,13 @@ extern int h_errno;
 
 static uint16_t nsn_ntohs(uint16_t v) { return lwip_ntohs(v); }
 
+static uint32_t read_be32(const void *p)
+{
+    uint32_t v;
+    memcpy(&v, p, sizeof(v));
+    return lwip_ntohl(v);
+}
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 
@@ -265,6 +272,14 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
     return fd;
 }
 
+DECL_FUNCTION(int, mw_socket, int domain, int type, int protocol)
+{
+    SHIM_TRACE(1, "mw_socket(%d,%d,%d) -> NATIVE probe",
+               domain, type, protocol);
+    errno = -1;
+    return real_mw_socket(domain, type, protocol);
+}
+
 DECL_FUNCTION(int, socketclose, int sockfd)
 {
     if (is_foreign(sockfd)) {
@@ -392,16 +407,57 @@ DECL_FUNCTION(int, sendto, int sockfd, const void *buf, size_t len, int flags,
               const struct nsn_sockaddr *dest_addr, socklen_t addrlen)
 {
     if (is_foreign(sockfd)) {
+        SHIM_TRACE(2, "sendto(fd=%d,len=%u) -> NATIVE",
+                   sockfd, (unsigned)len);
         errno = -1;
         return real_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
     }
+
     errno = 0;
+
+    if (!dest_addr) {
+        int r = (int)lwip_sendto(stack_fd(sockfd), buf, len,
+                                 msg_flags_to_lwip(flags), NULL, 0);
+
+        SHIM_TRACE(2,
+                   "sendto fd=%d/lwfd=%d connected len=%u rc=%d errno=%d",
+                   sockfd, stack_fd(sockfd), (unsigned)len, r, errno);
+        return r;
+    }
+
     struct sockaddr_in l;
-    if (!dest_addr)
-        return (int)lwip_sendto(stack_fd(sockfd), buf, len, msg_flags_to_lwip(flags), NULL, 0);
-    if (!sockaddr_to_lwip(&l, dest_addr, addrlen)) { errno = EAFNOSUPPORT; return -1; }
-    return (int)lwip_sendto(stack_fd(sockfd), buf, len, msg_flags_to_lwip(flags),
-                            (struct sockaddr *)&l, sizeof(l));
+    if (!sockaddr_to_lwip(&l, dest_addr, addrlen)) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+
+    int r = (int)lwip_sendto(stack_fd(sockfd), buf, len,
+                             msg_flags_to_lwip(flags),
+                             (struct sockaddr *)&l, sizeof(l));
+
+    uint32_t ip = lwip_ntohl(l.sin_addr.s_addr);
+
+    SHIM_TRACE(2,
+               "sendto fd=%d/lwfd=%d -> %u.%u.%u.%u:%u len=%u rc=%d errno=%d",
+               sockfd, stack_fd(sockfd),
+               (ip >> 24) & 255,
+               (ip >> 16) & 255,
+               (ip >> 8) & 255,
+               ip & 255,
+               nsn_ntohs(l.sin_port),
+               (unsigned)len,
+               r, errno);
+
+    if (buf && len == 16) {
+        SHIM_TRACE(2,
+                   "UDP16 TX type=%u word1=%u word2=%08x word3=%08x",
+                   read_be32((const uint8_t *)buf + 0),
+                   read_be32((const uint8_t *)buf + 4),
+                   read_be32((const uint8_t *)buf + 8),
+                   read_be32((const uint8_t *)buf + 12));
+    }
+
+    return r;
 }
 
 DECL_FUNCTION(int, sendto_multi,
@@ -504,10 +560,8 @@ DECL_FUNCTION(int, recvfrom_ex,
         return -1;
     }
 
-    /*
-     * Wii U extension: flag 0x40 requests the received packet TTL
-     * through the extra data byte.
-     */
+    int original_flags = flags;
+
     if ((flags & 0x40) && extra && extra_len >= 1)
         ((uint8_t *)extra)[0] = 64;
 
@@ -522,13 +576,40 @@ DECL_FUNCTION(int, recvfrom_ex,
         src_addr ? (struct sockaddr *)&l : NULL,
         src_addr ? &llen : NULL);
 
-    if (r >= 0 && src_addr)
+    if (r >= 0 && src_addr) {
+        uint32_t ip = lwip_ntohl(l.sin_addr.s_addr);
+
+        SHIM_TRACE(2,
+                   "recvfrom_ex fd=%d/lwfd=%d <- %u.%u.%u.%u:%u len=%d rc=%d flags=0x%x",
+                   sockfd, stack_fd(sockfd),
+                   (ip >> 24) & 255,
+                   (ip >> 16) & 255,
+                   (ip >> 8) & 255,
+                   ip & 255,
+                   nsn_ntohs(l.sin_port),
+                   len, r, original_flags);
+
         sockaddr_to_nsn(src_addr, addrlen,
                         (struct sockaddr *)&l, *addrlen);
+    } else {
+        SHIM_TRACE(2,
+                   "recvfrom_ex fd=%d/lwfd=%d len=%d rc=%d errno=%d flags=0x%x",
+                   sockfd, stack_fd(sockfd),
+                   len, r, errno, original_flags);
+    }
 
-    SHIM_TRACE(2,
-               "recvfrom_ex fd=%d/lwfd=%d len=%d rc=%d errno=%d",
-               sockfd, stack_fd(sockfd), len, r, errno);
+    if (r == 16 && buf) {
+        SHIM_TRACE(2,
+                   "UDP16 RX type=%u word1=%u word2=%08x word3=%08x",
+                   read_be32((const uint8_t *)buf + 0),
+                   read_be32((const uint8_t *)buf + 4),
+                   read_be32((const uint8_t *)buf + 8),
+                   read_be32((const uint8_t *)buf + 12));
+    }
+
+    if ((original_flags & 0x40) && extra && extra_len >= 1)
+        SHIM_TRACE(2, "recvfrom_ex extra TTL=%u",
+                   (unsigned)((uint8_t *)extra)[0]);
 
     return r;
 }
@@ -1057,6 +1138,7 @@ int nsysnet_shim_install(void)
     SHIM_TRACE(2, "FunctionPatcher v%u", version);
 
     SHIM_PATCH(socket);
+    SHIM_PATCH(mw_socket);
     SHIM_PATCH(socketclose);
     SHIM_PATCH(socketclose_all);
     SHIM_PATCH(bind);
