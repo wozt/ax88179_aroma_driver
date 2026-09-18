@@ -475,7 +475,7 @@ static void test_recvfrom_multi(void)
     int results[16]
         __attribute__((aligned(0x40)));
 
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 16; i++)
         results[i] = 0x55555555;
 
     struct ax_recvfrom_multi_buffers b
@@ -487,7 +487,7 @@ static void test_recvfrom_multi(void)
         .fromslen = 0x40,
 
         .results = results,
-        .resultslen = 0x20
+        .resultslen = 0x40
     };
 
     struct timeval timeout
