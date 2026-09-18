@@ -1247,14 +1247,75 @@ DECL_FUNCTION(int, select, int nfds, struct nsn_fd_set *readfds, struct nsn_fd_s
 
 DECL_FUNCTION(int, getsockname, int sockfd, struct nsn_sockaddr *addr, socklen_t *addrlen)
 {
-    if (is_foreign(sockfd)) { errno = -1; return real_getsockname(sockfd, addr, addrlen); }
+    if (is_foreign(sockfd)) {
+        errno = -1;
+        return real_getsockname(sockfd, addr, addrlen);
+    }
+
     errno = 0;
+
+    if (!addr || !addrlen) {
+        errno = EFAULT;
+        return -1;
+    }
+
     struct sockaddr_in l;
     socklen_t llen = sizeof(l);
-    if (!addr || !addrlen) { errno = EFAULT; return -1; }
-    int r = lwip_getsockname(stack_fd(sockfd), (struct sockaddr *)&l, &llen);
-    if (r == 0) sockaddr_to_nsn(addr, addrlen, (struct sockaddr *)&l, *addrlen);
-    return r;
+
+    memset(&l, 0, sizeof(l));
+
+    int r = lwip_getsockname(
+        stack_fd(sockfd),
+        (struct sockaddr *)&l,
+        &llen);
+
+    if (r != 0)
+        return r;
+
+    /*
+     * Native nsysnet behaviour:
+     *
+     * A UDP socket explicitly bound to INADDR_ANY still reports
+     * 0.0.0.0 while unconnected. Once connected, getsockname()
+     * exposes the local address chosen for that route.
+     *
+     * lwIP leaves the PCB local_ip as ANY, so emulate nsysnet only
+     * when the socket is demonstrably connected.
+     */
+    if (l.sin_family == AF_INET &&
+        l.sin_addr.s_addr == INADDR_ANY) {
+
+        struct sockaddr_in peer;
+        socklen_t peer_len = sizeof(peer);
+
+        memset(&peer, 0, sizeof(peer));
+
+        if (lwip_getpeername(
+                stack_fd(sockfd),
+                (struct sockaddr *)&peer,
+                &peer_len) == 0) {
+
+            uint32_t ax_ip = ax_net_ip4();
+
+            if (ax_ip != 0)
+                l.sin_addr.s_addr = ax_ip;
+        }
+
+        /*
+         * getpeername() on an unconnected socket may set errno.
+         * A successful getsockname() must not leak that internal probe
+         * error to the title.
+         */
+        errno = 0;
+    }
+
+    sockaddr_to_nsn(
+        addr,
+        addrlen,
+        (struct sockaddr *)&l,
+        *addrlen);
+
+    return 0;
 }
 
 DECL_FUNCTION(int, getpeername, int sockfd, struct nsn_sockaddr *addr, socklen_t *addrlen)
