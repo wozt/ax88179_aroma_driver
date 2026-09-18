@@ -163,13 +163,115 @@ static unsigned nssl_io_read;
  * 0 = empty, -1 = producer filling it, >0 = bytes ready, -2 = consumed.
  * No logging happens from the title thread.
  */
-#define NSSL_PREVIEW_MAX 512
+#define NSSL_PREVIEW_MAX 1024
 
 static unsigned char nssl_write_preview[NSSL_PREVIEW_MAX];
 static unsigned char nssl_read_preview[NSSL_PREVIEW_MAX];
 
 static atomic_int nssl_write_preview_state;
 static atomic_int nssl_read_preview_state;
+
+/*
+ * Deferred socket diagnostics after the first successful NSSL response.
+ * Never log directly from title socket hooks.
+ */
+#define NET_TRACE_SLOTS 32
+
+#define NET_TRACE_SOCKET   1
+#define NET_TRACE_CONNECT  2
+#define NET_TRACE_LASTERR  3
+
+struct net_trace_event {
+    atomic_int ready;
+    int op;
+    int ax;
+    int fd;
+    int rc;
+    int err;
+    int port;
+    unsigned char ip[4];
+};
+
+static struct net_trace_event net_trace_events[NET_TRACE_SLOTS];
+static atomic_uint net_trace_write;
+static unsigned net_trace_read;
+static atomic_int net_trace_enabled;
+
+static void net_trace_queue(int op,
+                            int ax,
+                            int fd,
+                            int rc,
+                            int err,
+                            const struct nsn_sockaddr *addr,
+                            socklen_t addrlen)
+{
+    if (!atomic_load(&net_trace_enabled))
+        return;
+
+    unsigned slot = atomic_fetch_add(&net_trace_write, 1);
+
+    if (slot >= NET_TRACE_SLOTS)
+        return;
+
+    struct net_trace_event *e = &net_trace_events[slot];
+
+    e->op = op;
+    e->ax = ax;
+    e->fd = fd;
+    e->rc = rc;
+    e->err = err;
+    e->port = 0;
+
+    e->ip[0] = 0;
+    e->ip[1] = 0;
+    e->ip[2] = 0;
+    e->ip[3] = 0;
+
+    if (addr &&
+        addrlen >= sizeof(struct nsn_sockaddr_in) &&
+        addr->sa_family == NSN_AF_INET) {
+        const struct nsn_sockaddr_in *a =
+            (const struct nsn_sockaddr_in *)addr;
+
+        e->port = nsn_ntohs(a->sin_port);
+
+        memcpy(e->ip, &a->sin_addr, 4);
+    }
+
+    atomic_store_explicit(&e->ready, 1, memory_order_release);
+}
+
+int nsysnet_shim_take_net_trace(int *op,
+                                int *ax,
+                                int *fd,
+                                int *rc,
+                                int *err,
+                                int *port,
+                                unsigned char ip[4])
+{
+    if (net_trace_read >= NET_TRACE_SLOTS)
+        return 0;
+
+    struct net_trace_event *e = &net_trace_events[net_trace_read];
+
+    if (!atomic_load_explicit(&e->ready, memory_order_acquire))
+        return 0;
+
+    if (op) *op = e->op;
+    if (ax) *ax = e->ax;
+    if (fd) *fd = e->fd;
+    if (rc) *rc = e->rc;
+    if (err) *err = e->err;
+    if (port) *port = e->port;
+
+    if (ip)
+        memcpy(ip, e->ip, 4);
+
+    atomic_store(&e->ready, 0);
+    net_trace_read++;
+
+    return 1;
+}
 
 void nsysnet_shim_set_trace_level(int level)
 {
@@ -338,7 +440,18 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
                    domain, type, protocol,
                    atomic_load(&force_native) ? " forced" : "");
         errno = -1;
-        return real_socket(domain, type, protocol);
+
+        int native_fd = real_socket(domain, type, protocol);
+
+        net_trace_queue(NET_TRACE_SOCKET,
+                        0,
+                        native_fd,
+                        native_fd,
+                        0,
+                        NULL,
+                        0);
+
+        return native_fd;
     }
     errno = 0;
     int s = lwip_socket(domain, type, protocol);
@@ -364,6 +477,15 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
         return -1;
     }
     track_fd(fd, s);
+
+    net_trace_queue(NET_TRACE_SOCKET,
+                    1,
+                    fd,
+                    fd,
+                    0,
+                    NULL,
+                    0);
+
     atomic_store(&ax_activity_pending, 1);
     SHIM_TRACE(1, "socket(%d,%d,%d) -> AX fd=%d lwfd=%d", domain, type, protocol, fd, s);
     return fd;
@@ -429,14 +551,60 @@ DECL_FUNCTION(int, connect, int sockfd, const struct nsn_sockaddr *addr, socklen
 {
     if (is_foreign(sockfd)) {
         SHIM_TRACE(1, "connect(fd=%d) -> NATIVE", sockfd);
+
         errno = -1;
-        return real_connect(sockfd, addr, addrlen);
+
+        int r = real_connect(sockfd, addr, addrlen);
+
+        net_trace_queue(NET_TRACE_CONNECT,
+                        0,
+                        sockfd,
+                        r,
+                        -1,
+                        addr,
+                        addrlen);
+
+        return r;
     }
-    SHIM_TRACE(1, "connect(fd=%d/lwfd=%d) -> AX", sockfd, stack_fd(sockfd));
+
+    SHIM_TRACE(1, "connect(fd=%d/lwfd=%d) -> AX",
+               sockfd, stack_fd(sockfd));
+
     errno = 0;
+
     struct sockaddr_in l;
-    if (!sockaddr_to_lwip(&l, addr, addrlen)) { errno = EAFNOSUPPORT; return -1; }
-    return lwip_connect(stack_fd(sockfd), (struct sockaddr *)&l, sizeof(l));
+
+    if (!sockaddr_to_lwip(&l, addr, addrlen)) {
+        errno = EAFNOSUPPORT;
+
+        net_trace_queue(NET_TRACE_CONNECT,
+                        1,
+                        sockfd,
+                        -1,
+                        errno,
+                        addr,
+                        addrlen);
+
+        return -1;
+    }
+
+    int r = lwip_connect(stack_fd(sockfd),
+                         (struct sockaddr *)&l,
+                         sizeof(l));
+
+    int saved_errno = errno;
+
+    net_trace_queue(NET_TRACE_CONNECT,
+                    1,
+                    sockfd,
+                    r,
+                    saved_errno,
+                    addr,
+                    addrlen);
+
+    errno = saved_errno;
+
+    return r;
 }
 
 DECL_FUNCTION(int, listen, int sockfd, int backlog)
@@ -909,17 +1077,29 @@ DECL_FUNCTION(int, getsockopt, int sockfd, int level, int optname,
 
 DECL_FUNCTION(int, socketlasterr, void)
 {
+    int result;
+
     /*
      * In reference/native mode never infer anything from newlib errno.
      * Return exactly what nsysnet would have returned without the shim.
      */
-    if (atomic_load(&force_native))
-        return real_socketlasterr();
+    if (atomic_load(&force_native)) {
+        result = real_socketlasterr();
+    } else if (errno < 0) {
+        result = real_socketlasterr();
+    } else {
+        result = errno_to_nsn(errno);
+    }
 
-    if (errno < 0)
-        return real_socketlasterr();
+    net_trace_queue(NET_TRACE_LASTERR,
+                    0,
+                    -1,
+                    result,
+                    0,
+                    NULL,
+                    0);
 
-    return errno_to_nsn(errno);
+    return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1184,11 +1364,18 @@ DECL_FUNCTION(int32_t, NSSLRead,
 
     int bytes = outBytesRead ? *outBytesRead : -1;
 
-    if (result == 0 && bytes > 0)
+    if (result == 0 && bytes > 0) {
         nssl_capture_preview(&nssl_read_preview_state,
                              nssl_read_preview,
                              buffer,
                              bytes);
+
+        /*
+         * Everything interesting for Mario Maker happens immediately
+         * after discovery. Start deferred socket tracing now.
+         */
+        atomic_store(&net_trace_enabled, 1);
+    }
 
     nssl_io_queue(NSSL_IO_READ,
                   connection,
@@ -1553,6 +1740,13 @@ void nsysnet_shim_begin_title(void) {
 
     atomic_store(&nssl_write_preview_state, 0);
     atomic_store(&nssl_read_preview_state, 0);
+
+    atomic_store(&net_trace_enabled, 0);
+    atomic_store(&net_trace_write, 0);
+    net_trace_read = 0;
+
+    for (int i = 0; i < NET_TRACE_SLOTS; i++)
+        atomic_store(&net_trace_events[i].ready, 0);
 
     for (int i = 0; i < NSSL_IO_SLOTS; i++)
         atomic_store(&nssl_io_events[i].ready, 0);

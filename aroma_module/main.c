@@ -399,7 +399,7 @@ static int run_network(int argc, const char **argv)
          * bytes into RAM; formatting/logging happens here.
          */
         {
-            unsigned char preview[512];
+            unsigned char preview[1024];
 
             int n = nsysnet_shim_take_nssl_preview(1,
                                                     preview,
@@ -412,6 +412,43 @@ static int run_network(int argc, const char **argv)
                                                 sizeof(preview));
             if (n > 0)
                 log_nssl_preview("RX", preview, n);
+        }
+
+        /*
+         * Deferred post-discovery socket trace.
+         */
+        {
+            int op;
+            int ax;
+            int fd;
+            int rc;
+            int err;
+            int port;
+            unsigned char peer[4];
+
+            while (nsysnet_shim_take_net_trace(&op,
+                                                &ax,
+                                                &fd,
+                                                &rc,
+                                                &err,
+                                                &port,
+                                                peer)) {
+                if (op == 1) {
+                    AX_LOG("NET SOCKET path=%s fd=%d",
+                           ax ? "AX" : "NATIVE",
+                           fd);
+                } else if (op == 2) {
+                    AX_LOG("NET CONNECT path=%s fd=%d peer=%u.%u.%u.%u:%d rc=%d errno=%d",
+                           ax ? "AX" : "NATIVE",
+                           fd,
+                           peer[0], peer[1], peer[2], peer[3],
+                           port,
+                           rc,
+                           err);
+                } else if (op == 3) {
+                    AX_LOG("NET LASTERR=%d", rc);
+                }
+            }
         }
 
         /* Log IP changes and status */
