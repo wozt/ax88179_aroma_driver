@@ -61,6 +61,14 @@ struct netbuf {
   struct pbuf *p, *ptr;
   ip_addr_t addr;
   u16_t port;
+
+  /*
+   * AX/Wii U extension: preserve the IPv4 TTL belonging to this exact
+   * received datagram. The IP header is no longer available when the
+   * socket API later dequeues this netbuf.
+   */
+  u8_t recv_ttl;
+
 #if LWIP_NETBUF_RECVINFO || LWIP_CHECKSUM_ON_COPY
   u8_t flags;
   u16_t toport_chksum;

@@ -189,6 +189,15 @@ recv_raw(void *arg, struct raw_pcb *pcb, struct pbuf *p,
       ip_addr_copy(buf->addr, *ip_current_src_addr());
       buf->port = pcb->protocol;
 
+#if LWIP_IPV4
+      buf->recv_ttl =
+          (!ip_current_is_v6() && ip4_current_header())
+              ? IPH_TTL(ip4_current_header())
+              : 0;
+#else
+      buf->recv_ttl = 0;
+#endif
+
       len = q->tot_len;
       if (sys_mbox_trypost(&conn->recvmbox, buf) != ERR_OK) {
         netbuf_delete(buf);
@@ -258,6 +267,16 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     buf->ptr = p;
     ip_addr_set(&buf->addr, addr);
     buf->port = port;
+
+#if LWIP_IPV4
+    buf->recv_ttl =
+        (!ip_current_is_v6() && ip4_current_header())
+            ? IPH_TTL(ip4_current_header())
+            : 0;
+#else
+    buf->recv_ttl = 0;
+#endif
+
 #if LWIP_NETBUF_RECVINFO
     if (conn->flags & NETCONN_FLAG_PKTINFO) {
       /* get the UDP header - always in the first pbuf, ensured by udp_input */

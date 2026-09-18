@@ -1148,7 +1148,8 @@ lwip_recv_tcp_from(struct lwip_sock *sock, struct sockaddr *from, socklen_t *fro
  * Keeps sock->lastdata for peeking.
  */
 static err_t
-lwip_recvfrom_udp_raw(struct lwip_sock *sock, int flags, struct msghdr *msg, u16_t *datagram_len, int dbg_s)
+lwip_recvfrom_udp_raw(struct lwip_sock *sock, int flags, struct msghdr *msg,
+                      u16_t *datagram_len, u8_t *recv_ttl, int dbg_s)
 {
   struct netbuf *buf;
   u8_t apiflags;
@@ -1182,6 +1183,11 @@ lwip_recvfrom_udp_raw(struct lwip_sock *sock, int flags, struct msghdr *msg, u16
     sock->lastdata.netbuf = buf;
   }
   buflen = buf->p->tot_len;
+
+  if (recv_ttl != NULL) {
+    *recv_ttl = buf->recv_ttl;
+  }
+
   LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_recvfrom_udp_raw: buflen=%"U16_F"\n", buflen));
 
   copied = 0;
@@ -1259,21 +1265,31 @@ lwip_recvfrom_udp_raw(struct lwip_sock *sock, int flags, struct msghdr *msg, u16
 }
 
 ssize_t
-lwip_recvfrom(int s, void *mem, size_t len, int flags,
-              struct sockaddr *from, socklen_t *fromlen)
+lwip_recvfrom_with_ttl(int s, void *mem, size_t len, int flags,
+                       struct sockaddr *from, socklen_t *fromlen,
+                       u8_t *recv_ttl)
 {
   struct lwip_sock *sock;
   ssize_t ret;
 
-  LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_recvfrom(%d, %p, %"SZT_F", 0x%x, ..)\n", s, mem, len, flags));
+  if (recv_ttl != NULL) {
+    *recv_ttl = 0;
+  }
+
+  LWIP_DEBUGF(SOCKETS_DEBUG,
+              ("lwip_recvfrom_with_ttl(%d, %p, %"SZT_F", 0x%x, ..)\n",
+               s, mem, len, flags));
+
   sock = get_socket(s);
   if (!sock) {
     return -1;
   }
+
 #if LWIP_TCP
   if (NETCONNTYPE_GROUP(netconn_type(sock->conn)) == NETCONN_TCP) {
     ret = lwip_recv_tcp(sock, mem, len, flags);
-    lwip_recv_tcp_from(sock, from, fromlen, "lwip_recvfrom", s, ret);
+    lwip_recv_tcp_from(sock, from, fromlen,
+                       "lwip_recvfrom_with_ttl", s, ret);
     done_socket(sock);
     return ret;
   } else
@@ -1283,8 +1299,10 @@ lwip_recvfrom(int s, void *mem, size_t len, int flags,
     struct iovec vec;
     struct msghdr msg;
     err_t err;
+
     vec.iov_base = mem;
     vec.iov_len = len;
+
     msg.msg_control = NULL;
     msg.msg_controllen = 0;
     msg.msg_flags = 0;
@@ -1292,15 +1310,30 @@ lwip_recvfrom(int s, void *mem, size_t len, int flags,
     msg.msg_iovlen = 1;
     msg.msg_name = from;
     msg.msg_namelen = (fromlen ? *fromlen : 0);
-    err = lwip_recvfrom_udp_raw(sock, flags, &msg, &datagram_len, s);
+
+    err = lwip_recvfrom_udp_raw(
+        sock,
+        flags,
+        &msg,
+        &datagram_len,
+        recv_ttl,
+        s);
+
     if (err != ERR_OK) {
-      LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_recvfrom[UDP/RAW](%d): buf == NULL, error is \"%s\"!\n",
-                                  s, lwip_strerr(err)));
+      LWIP_DEBUGF(
+          SOCKETS_DEBUG,
+          ("lwip_recvfrom_with_ttl[UDP/RAW](%d): error is \"%s\"!\n",
+           s, lwip_strerr(err)));
+
       set_errno(err_to_errno(err));
       done_socket(sock);
       return -1;
     }
-    ret = (ssize_t)LWIP_MIN(LWIP_MIN(len, datagram_len), SSIZE_MAX);
+
+    ret = (ssize_t)LWIP_MIN(
+        LWIP_MIN(len, datagram_len),
+        SSIZE_MAX);
+
     if (fromlen) {
       *fromlen = msg.msg_namelen;
     }
@@ -1309,6 +1342,14 @@ lwip_recvfrom(int s, void *mem, size_t len, int flags,
   set_errno(0);
   done_socket(sock);
   return ret;
+}
+
+ssize_t
+lwip_recvfrom(int s, void *mem, size_t len, int flags,
+              struct sockaddr *from, socklen_t *fromlen)
+{
+  return lwip_recvfrom_with_ttl(
+      s, mem, len, flags, from, fromlen, NULL);
 }
 
 ssize_t
@@ -1418,7 +1459,7 @@ lwip_recvmsg(int s, struct msghdr *message, int flags)
   {
     u16_t datagram_len = 0;
     err_t err;
-    err = lwip_recvfrom_udp_raw(sock, flags, message, &datagram_len, s);
+    err = lwip_recvfrom_udp_raw(sock, flags, message, &datagram_len, NULL, s);
     if (err != ERR_OK) {
       LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_recvmsg[UDP/RAW](%d): buf == NULL, error is \"%s\"!\n",
                                   s, lwip_strerr(err)));

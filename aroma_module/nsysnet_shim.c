@@ -135,6 +135,7 @@ struct nsn_sendto_multi_ex_buffers {
 #define NSN_MSG_OOB       0x0001
 #define NSN_MSG_PEEK      0x0002
 #define NSN_MSG_DONTWAIT  0x0020
+#define NSN_MSG_IP_RECVTTL 0x0040
 
 #define NSN_IP_TOS             3
 #define NSN_IP_TTL             4
@@ -914,24 +915,36 @@ DECL_FUNCTION(int, recvfrom_ex,
         return -1;
     }
 
-    /*
-     * Wii U extension: flag 0x40 requests the received packet TTL.
-     * We currently provide a compatibility placeholder rather than the
-     * true received IP TTL.
-     */
-    if ((flags & 0x40) && extra && extra_len >= 1)
-        ((uint8_t *)extra)[0] = 64;
-
     struct sockaddr_in l;
     socklen_t llen = sizeof(l);
+    uint8_t recv_ttl = 0;
 
-    int r = (int)lwip_recvfrom(
+    int r = (int)lwip_recvfrom_with_ttl(
         stack_fd(sockfd),
         buf,
         len,
         msg_flags_to_lwip(flags),
         src_addr ? (struct sockaddr *)&l : NULL,
-        src_addr ? &llen : NULL);
+        src_addr ? &llen : NULL,
+        &recv_ttl);
+
+    /*
+     * Native nsysnet behaviour established by recvfrom_ex_probe:
+     *
+     *   - on successful receive, the supplied output area is zeroed
+     *   - MSG_IP_RECVTTL (0x40) stores the real received IPv4 TTL in
+     *     the first byte
+     *   - bytes 1..extra_len-1 remain zero
+     *
+     * Leave extra untouched on receive failure, matching the observed
+     * native failure case.
+     */
+    if (r >= 0 && extra && extra_len > 0) {
+        memset(extra, 0, (size_t)extra_len);
+
+        if (flags & NSN_MSG_IP_RECVTTL)
+            ((uint8_t *)extra)[0] = recv_ttl;
+    }
 
     if (r >= 0 && src_addr) {
         sockaddr_to_nsn(src_addr, addrlen,

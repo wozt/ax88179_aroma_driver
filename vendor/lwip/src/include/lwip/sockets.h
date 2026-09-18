@@ -607,6 +607,14 @@ ssize_t lwip_read(int s, void *mem, size_t len);
 ssize_t lwip_readv(int s, const struct iovec *iov, int iovcnt);
 ssize_t lwip_recvfrom(int s, void *mem, size_t len, int flags,
       struct sockaddr *from, socklen_t *fromlen);
+
+/*
+ * Local AX extension: same receive semantics as lwip_recvfrom(), while
+ * also returning the IPv4 TTL saved with the dequeued UDP/raw datagram.
+ */
+ssize_t lwip_recvfrom_with_ttl(int s, void *mem, size_t len, int flags,
+      struct sockaddr *from, socklen_t *fromlen, u8_t *recv_ttl);
+
 ssize_t lwip_recvmsg(int s, struct msghdr *message, int flags);
 ssize_t lwip_send(int s, const void *dataptr, size_t size, int flags);
 ssize_t lwip_sendmsg(int s, const struct msghdr *message, int flags);
