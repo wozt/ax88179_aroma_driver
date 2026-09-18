@@ -792,3 +792,79 @@ Conclusion:
 
 Fix: wait for readability while pumping ProcUI and keep the tested socket
 nonblocking before invoking the raw nsysnet export.
+
+
+## recvfrom_ex native TTL ABI
+
+`recvfrom_ex` was characterized on the native Wii U nsysnet path.
+
+Test path:
+
+- route: `native`
+- local socket: `192.168.2.124:19030`
+- peer: `192.168.2.100:19031`
+- raw nsysnet fd: `6`
+
+The PC transmitted UDP datagrams with explicitly controlled IPv4 TTL
+values.
+
+### Without MSG_IP_RECVTTL
+
+With:
+
+- flags = `0`
+- msglen = `64`
+
+the datagram was received normally and the entire supplied `extra`
+buffer was cleared to zero.
+
+Example:
+
+    payload TTL=91
+    extra = 00 00 00 00 ...
+
+Therefore `extra` is an output buffer which nsysnet initializes on a
+successful receive even when TTL reporting was not requested.
+
+### MSG_IP_RECVTTL
+
+Flag `0x40` is confirmed to request the received IPv4 TTL.
+
+For every tested `msglen >= 1`, the first byte of `extra` contained the
+actual received packet TTL:
+
+    payload TTL=127 -> extra[0]=0x7f
+    payload TTL=200 -> extra[0]=0xc8
+    payload TTL=17  -> extra[0]=0x11
+    payload TTL=37  -> extra[0]=0x25
+    payload TTL=64  -> extra[0]=0x40
+    payload TTL=91  -> extra[0]=0x5b
+
+For msglen values 2, 4, 8, 16 and 64, all remaining bytes inside the
+provided output length were zero.
+
+Observed contract on successful receive:
+
+    memset(extra, 0, msglen);
+
+    if ((flags & 0x40) && msglen >= 1)
+        extra[0] = received_ipv4_ttl;
+
+### msglen=0
+
+One nonblocking test with `flags=0x40, msglen=0` returned:
+
+    rc=-1
+    socketlasterr=11
+
+The datagram was not consumed.
+
+This edge case is not considered fully characterized yet because the
+test uses readiness polling plus a nonblocking raw nsysnet call. It must
+not be used to infer an EINVAL/EWOULDBLOCK ABI rule without a dedicated
+test.
+
+### Probe lifecycle
+
+The corrected nonblocking probe exited normally through the official
+HOME overlay -> Quit path.
