@@ -112,7 +112,15 @@ static err_t init_interface(struct netif *n)
     n->hwaddr_len = 6;
     memcpy(n->hwaddr, ax88179_mac(n->state), 6);
     n->mtu = 1500;
-    n->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET;
+    /*
+     * AX_RX_CTL_AMALL is enabled by the driver, so multicast frames are
+     * already accepted by the hardware. Tell lwIP this interface may run
+     * IGMP and let the IP layer perform group filtering.
+     */
+    n->flags = NETIF_FLAG_BROADCAST |
+               NETIF_FLAG_ETHARP |
+               NETIF_FLAG_ETHERNET |
+               NETIF_FLAG_IGMP;
     n->output = etharp_output;
     n->linkoutput = send_frame;
     return ERR_OK;

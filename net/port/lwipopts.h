@@ -16,6 +16,7 @@
 #define LWIP_ICMP 1
 #define LWIP_RAW 1
 #define LWIP_DHCP 1
+#define LWIP_IGMP 1
 /* The real name in 2.2.x. DHCP_DOES_ARP_CHECK, which this used to set,
  * no longer exists anywhere in lwIP and was being ignored in silence. */
 #define LWIP_DHCP_DOES_ACD_CHECK 1
@@ -23,8 +24,8 @@
  * Headroom on the timeout pool, and not an arbitrary number.
  *
  * The default is the exact count of the modules compiled in -- with TCP,
- * reassembly, ARP, DHCP, ACD and DNS that is seven, six of which are
- * taken the moment the stack initialises. That leaves one slot, and
+ * reassembly, ARP, DHCP, ACD, IGMP and DNS that is eight. With only
+ * the default-sized pool this leaves essentially no useful headroom, and
  * lwip_cyclic_timer reschedules each cyclic timer by allocating from
  * this same pool *and never checks whether it got one*. One failed
  * allocation and that timer is gone for the life of the stack. That is

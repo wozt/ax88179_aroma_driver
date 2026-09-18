@@ -370,16 +370,29 @@ static int socket_opt_to_lwip(int opt)
 static int ip_opt_to_lwip(int opt)
 {
     switch (opt) {
-    case NSN_IP_TOS: return IP_TOS;
-    case NSN_IP_TTL: return IP_TTL;
+    case NSN_IP_TOS:
+        return IP_TOS;
 
-    /*
-     * Multicast is deliberately not translated yet. The current lwIP
-     * build has LWIP_IGMP=0, so membership and multicast TX options are
-     * unavailable. Add these only when IGMP is enabled and the AX netif
-     * advertises the corresponding capability.
-     */
-    default: return -1;
+    case NSN_IP_TTL:
+        return IP_TTL;
+
+    case NSN_IP_MULTICAST_IF:
+        return IP_MULTICAST_IF;
+
+    case NSN_IP_MULTICAST_TTL:
+        return IP_MULTICAST_TTL;
+
+    case NSN_IP_MULTICAST_LOOP:
+        return IP_MULTICAST_LOOP;
+
+    case NSN_IP_ADD_MEMBERSHIP:
+        return IP_ADD_MEMBERSHIP;
+
+    case NSN_IP_DROP_MEMBERSHIP:
+        return IP_DROP_MEMBERSHIP;
+
+    default:
+        return -1;
     }
 }
 
@@ -579,7 +592,12 @@ DECL_FUNCTION(int, accept, int sockfd, struct nsn_sockaddr *addr, socklen_t *add
     socklen_t llen = sizeof(l);
     int s = lwip_accept(stack_fd(sockfd), addr ? (struct sockaddr *)&l : NULL, addr ? &llen : NULL);
     if (s >= 0) {
-        int fd = real_socket(NSN_AF_INET, SOCK_DGRAM, 0);
+        /*
+         * accept() can only produce a connection-oriented socket here.
+         * Keep the native placeholder the same type as the accepted
+         * lwIP socket so a later AX->native promotion remains valid.
+         */
+        int fd = real_socket(NSN_AF_INET, SOCK_STREAM, 0);
         if (fd < 0 || fd >= 32) {
             if (fd >= 0) real_socketclose(fd);
             lwip_close(s); errno = EMFILE; return -1;
