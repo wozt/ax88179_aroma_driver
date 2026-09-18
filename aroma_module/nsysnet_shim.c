@@ -542,15 +542,48 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
 
 DECL_FUNCTION(int, socketclose, int sockfd)
 {
-    if (is_foreign(sockfd)) {
+    int was_ax = !is_foreign(sockfd);
+
+    if (!was_ax) {
         SHIM_TRACE(1, "close(fd=%d) -> NATIVE", sockfd);
+
         errno = -1;
-        return real_socketclose(sockfd);
+        int r = real_socketclose(sockfd);
+
+        net_trace_queue(NET_TRACE_CLOSE,
+                        0,
+                        sockfd,
+                        r,
+                        -1,
+                        NULL,
+                        0);
+
+        return r;
     }
-    SHIM_TRACE(1, "close(fd=%d/lwfd=%d) -> AX", sockfd, stack_fd(sockfd));
+
+    SHIM_TRACE(1, "close(fd=%d/lwfd=%d) -> AX",
+               sockfd, stack_fd(sockfd));
+
     errno = 0;
+
     int r = lwip_close(stack_fd(sockfd));
-    if (r == 0) { untrack_fd(sockfd); real_socketclose(sockfd); }
+    int saved_errno = errno;
+
+    if (r == 0) {
+        untrack_fd(sockfd);
+        real_socketclose(sockfd);
+    }
+
+    net_trace_queue(NET_TRACE_CLOSE,
+                    1,
+                    sockfd,
+                    r,
+                    saved_errno,
+                    NULL,
+                    0);
+
+    errno = saved_errno;
+
     return r;
 }
 
@@ -1088,6 +1121,16 @@ DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
     }
 
     SHIM_TRACE(1, "setsockopt fd=%d rc=%d errno=%d", sockfd, r, errno);
+
+    net_trace_queue_sockopt(NET_TRACE_SETSOCKOPT,
+                            1,
+                            sockfd,
+                            r,
+                            errno,
+                            level,
+                            optname,
+                            (int)optlen);
+
     return r;
 }
 
