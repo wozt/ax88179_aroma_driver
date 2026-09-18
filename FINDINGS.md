@@ -762,3 +762,33 @@ Raw layout:
 
 Passing libc `struct timeval` directly to the raw export produced an
 effective immediate timeout.
+
+
+## recvfrom_ex TTL probe v1 - blocking harness
+
+First native `recvfrom_ex` TTL characterization attempt.
+
+Observed before the hang:
+
+- module configuration: `route=native`
+- AX stack itself remained healthy at `192.168.2.190`
+- probe socket path: `192.168.2.124:19030`
+- raw nsysnet descriptor: `6`
+- execution reached `baseline: no MSG_IP_RECVTTL`
+
+The probe then blocked inside its first blocking `recvfrom_ex()` call.
+
+Because the call was made on the application's main/ProcUI thread,
+`probe_poll()` stopped running as well. Consequently the normal HOME
+overlay -> Quit path could no longer complete.
+
+Conclusion:
+
+- this run is inconclusive for the `recvfrom_ex` TTL ABI
+- it does confirm that the intended native socket path was selected
+- this is a probe/harness bug, not evidence of an nsysnet or AX bug
+- future socket probes must never make an unbounded blocking network call
+  on the ProcUI thread
+
+Fix: wait for readability while pumping ProcUI and keep the tested socket
+nonblocking before invoking the raw nsysnet export.
