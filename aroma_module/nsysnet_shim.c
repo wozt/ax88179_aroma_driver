@@ -120,6 +120,7 @@ static atomic_uintptr_t probe_thread;
 static atomic_int probe_owns_accepting;
 static atomic_int shim_trace_level;
 static atomic_int system_dns;
+static atomic_int force_native;
 
 void nsysnet_shim_set_trace_level(int level)
 {
@@ -129,6 +130,11 @@ void nsysnet_shim_set_trace_level(int level)
 void nsysnet_shim_set_system_dns(int enabled)
 {
     atomic_store(&system_dns, enabled ? 1 : 0);
+}
+
+void nsysnet_shim_set_force_native(int enabled)
+{
+    atomic_store(&force_native, enabled ? 1 : 0);
 }
 
 #define SHIM_TRACE(level, fmt, ...) \
@@ -322,6 +328,26 @@ static socklen_t sockaddr_to_lwip(struct sockaddr_in *out, const struct nsn_sock
     return sizeof(*out);
 }
 
+
+static int nsn_sockaddr_parts(const struct nsn_sockaddr *in,
+                              uint32_t *ip,
+                              uint16_t *port)
+{
+    if (!in || in->sa_family != NSN_AF_INET)
+        return 0;
+
+    const struct nsn_sockaddr_in *n =
+        (const struct nsn_sockaddr_in *)in;
+
+    if (ip)
+        *ip = lwip_ntohl(n->sin_addr);
+
+    if (port)
+        *port = nsn_ntohs(n->sin_port);
+
+    return 1;
+}
+
 static socklen_t sockaddr_to_nsn(struct nsn_sockaddr *out, socklen_t *outlen,
                                  const struct sockaddr *in, socklen_t cap)
 {
@@ -364,11 +390,13 @@ extern int (*real_socketclose)(int sockfd);
 
 DECL_FUNCTION(int, socket, int domain, int type, int protocol)
 {
-    if (!shim_accepts() || !ax_net_stack_ready() || domain != NSN_AF_INET) {
-        /* No adapter, or the stack is still coming up. Returning an
-         * error here would break a title outright; a real socket just
-         * puts it back on the console's own network. */
-        SHIM_TRACE(1, "socket(%d,%d,%d) -> NATIVE", domain, type, protocol);
+    if (atomic_load(&force_native) ||
+        !shim_accepts() ||
+        !ax_net_stack_ready() ||
+        domain != NSN_AF_INET) {
+        SHIM_TRACE(1, "socket(%d,%d,%d) -> NATIVE%s",
+                   domain, type, protocol,
+                   atomic_load(&force_native) ? " forced" : "");
         errno = -1;
         return real_socket(domain, type, protocol);
     }
@@ -549,7 +577,24 @@ DECL_FUNCTION(int, sendto, int sockfd, const void *buf, size_t len, int flags,
 {
     if (is_foreign(sockfd)) {
         errno = -1;
-        return real_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
+
+        int r = real_sendto(sockfd, buf, len, flags,
+                            dest_addr, addrlen);
+
+        uint32_t ip = 0;
+        uint16_t port = 0;
+
+        if (buf && dest_addr &&
+            nsn_sockaddr_parts(dest_addr, &ip, &port) &&
+            (len == 16 || port == 33335)) {
+            nettrace_queue(NETTRACE_TX,
+                           sockfd, -1,
+                           ip, port,
+                           buf, (int)len,
+                           r, 0);
+        }
+
+        return r;
     }
 
     errno = 0;
@@ -690,10 +735,29 @@ DECL_FUNCTION(int, recvfrom_ex,
               int extra_len)
 {
     if (is_foreign(sockfd)) {
-        SHIM_TRACE(1, "recvfrom_ex(fd=%d) -> NATIVE", sockfd);
         errno = -1;
-        return real_recvfrom_ex(sockfd, buf, len, flags,
-                                src_addr, addrlen, extra, extra_len);
+
+        int r = real_recvfrom_ex(sockfd, buf, len, flags,
+                                 src_addr, addrlen, extra, extra_len);
+
+        if (r == 16 && src_addr) {
+            uint32_t ip = 0;
+            uint16_t port = 0;
+
+            if (nsn_sockaddr_parts(src_addr, &ip, &port)) {
+                nettrace_queue(NETTRACE_RX,
+                               sockfd, -1,
+                               ip, port,
+                               buf, r,
+                               r, 0);
+            }
+        }
+
+        SHIM_TRACE(2,
+                   "recvfrom_ex fd=%d/NATIVE len=%d flags=0x%x extra_len=%d rc=%d",
+                   sockfd, len, flags, extra_len, r);
+
+        return r;
     }
 
     errno = 0;

@@ -39,6 +39,7 @@ static uint8_t wd_stack[16 * 1024] __attribute__((aligned(0x40)));
 static int config_keep_first = 1;
 static int config_shim_trace = 0;
 static int config_system_dns = 0;
+static int config_force_native = 0;
 
 static void load_config(void)
 {
@@ -76,6 +77,11 @@ static void load_config(void)
         else if (strstr(b, "dns=ax"))
             config_system_dns = 0;
 
+        if (strstr(b, "route=native"))
+            config_force_native = 1;
+        else if (strstr(b, "route=ax"))
+            config_force_native = 0;
+
         int level;
         if (sscanf(b, "shim_trace=%d", &level) == 1) {
             if (level < 0) level = 0;
@@ -90,6 +96,7 @@ static void load_config(void)
            config_keep_first ? "keep_first" : "always");
     AX_LOG("CONFIG: shim trace = %d", config_shim_trace);
     AX_LOG("CONFIG: DNS = %s", config_system_dns ? "system" : "ax");
+    AX_LOG("CONFIG: route = %s", config_force_native ? "native" : "ax");
 }
 
 static const char *const mark_names[] = {
@@ -173,11 +180,13 @@ static int run_network(int argc, const char **argv)
     /* A fresh process: nothing lwIP left behind is still valid. */
     nsysnet_shim_set_trace_level(config_shim_trace);
     nsysnet_shim_set_system_dns(config_system_dns);
+    nsysnet_shim_set_force_native(config_force_native);
     ax_net_set_session_lease_mode(config_keep_first);
-    AX_LOG("config dhcp=%s trace=%d dns=%s",
+    AX_LOG("config dhcp=%s trace=%d dns=%s route=%s",
            config_keep_first ? "keep_first" : "always",
            config_shim_trace,
-           config_system_dns ? "system" : "ax");
+           config_system_dns ? "system" : "ax",
+           config_force_native ? "native" : "ax");
 
     ax_net_forget();
 
