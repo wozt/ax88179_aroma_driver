@@ -36,6 +36,11 @@ struct ax_recvfrom_multi_buffers {
     unsigned int resultslen;
 };
 
+struct ax_nsysnet_timeval {
+    int32_t tv_sec;
+    int32_t tv_usec;
+};
+
 struct ax_sendto_multi_ex_buffers {
     void *buffer;
     unsigned int bufferlen;
@@ -56,7 +61,7 @@ typedef int (*recvfrom_multi_fn)(
     struct ax_recvfrom_multi_buffers *buffs,
     int recv_datagram_len,
     int recv_datagram_count,
-    struct timeval *timeout);
+    struct ax_nsysnet_timeval *timeout);
 
 typedef int (*sendto_multi_fn)(
     int socket,
@@ -490,11 +495,16 @@ static void test_recvfrom_multi(void)
         .resultslen = 0x40
     };
 
-    struct timeval timeout
+    struct ax_nsysnet_timeval timeout
         __attribute__((aligned(0x40))) = {
         .tv_sec = 10,
         .tv_usec = 0
     };
+
+    probe_say(
+        "timeval sizeof libc=%u raw_nsysnet=%u",
+        (unsigned)sizeof(struct timeval),
+        (unsigned)sizeof(struct ax_nsysnet_timeval));
 
     probe_say(
         "waiting for 3 datagrams on UDP :%d...",
