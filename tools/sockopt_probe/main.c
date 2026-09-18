@@ -48,8 +48,6 @@ static const struct int_test tests[] = {
     /* IPPROTO_IP */
     { "IP_TOS",       SOCK_DGRAM, IPPROTO_IP, IP_TOS,            0x10, 1, 1 },
     { "IP_TTL",       SOCK_DGRAM, IPPROTO_IP, IP_TTL,            42,   1, 1 },
-    { "MCAST_TTL",    SOCK_DGRAM, IPPROTO_IP, IP_MULTICAST_TTL,  1,    1, 1 },
-    { "MCAST_LOOP",   SOCK_DGRAM, IPPROTO_IP, IP_MULTICAST_LOOP, 1,    1, 1 },
 
     /* SOL_TCP */
     { "ACKDELAY",     SOCK_STREAM, SOL_TCP, TCP_ACKDELAYTIME, 100,  1, 1 },
@@ -170,6 +168,108 @@ static void run_int_test(const struct int_test *t)
     close(fd);
 }
 
+
+static void run_u8_test(const char *name, int opt, unsigned set_value)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if (fd < 0) {
+        probe_say("%s socket FAIL errno=%d", name, errno);
+        return;
+    }
+
+    unsigned char setv = (unsigned char)set_value;
+
+    errno = 0;
+    int src = setsockopt(fd,
+                         IPPROTO_IP,
+                         opt,
+                         &setv,
+                         sizeof(setv));
+    int serr = errno;
+
+    unsigned char got = 0x55;
+    socklen_t len = sizeof(got);
+
+    errno = 0;
+    int grc = getsockopt(fd,
+                         IPPROTO_IP,
+                         opt,
+                         &got,
+                         &len);
+    int gerr = errno;
+
+    probe_say("%-12s u8 s=%d/%d g=%d/%d v=%u len=%u",
+              name,
+              src, serr,
+              grc, gerr,
+              (unsigned)got,
+              (unsigned)len);
+
+    close(fd);
+}
+
+static void run_buffer_matrix(const char *name, int opt)
+{
+    static const int sizes[] = {
+        1024,
+        4096,
+        8192,
+        16384,
+        32767,
+        32768,
+        65535,
+        65536
+    };
+
+    probe_say("--- %s matrix ---", name);
+
+    for (unsigned i = 0;
+         i < sizeof(sizes) / sizeof(sizes[0]) && pump();
+         i++) {
+
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+
+        if (fd < 0) {
+            probe_say("%s socket FAIL errno=%d",
+                      name, errno);
+            return;
+        }
+
+        int request = sizes[i];
+
+        errno = 0;
+        int src = setsockopt(fd,
+                             SOL_SOCKET,
+                             opt,
+                             &request,
+                             sizeof(request));
+        int serr = errno;
+
+        int got = -1;
+        socklen_t len = sizeof(got);
+
+        errno = 0;
+        int grc = getsockopt(fd,
+                             SOL_SOCKET,
+                             opt,
+                             &got,
+                             &len);
+        int gerr = errno;
+
+        probe_say("%s req=%d s=%d/%d g=%d/%d v=%d",
+                  name,
+                  request,
+                  src, serr,
+                  grc, gerr,
+                  got);
+
+        close(fd);
+
+        OSSleepTicks(OSMillisecondsToTicks(20));
+    }
+}
+
 static void run_linger_test(void)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -248,6 +348,26 @@ int main(void)
 
     if (running)
         run_linger_test();
+
+    /*
+     * nsysnet's multicast TTL/loop options are byte-sized. The original
+     * generic int probe was therefore not meaningful on big-endian Wii U.
+     */
+    if (running) {
+        probe_say("--- multicast u8 ---");
+        run_u8_test("MCAST_TTL", IP_MULTICAST_TTL, 7);
+        run_u8_test("MCAST_LOOP", IP_MULTICAST_LOOP, 1);
+    }
+
+    /*
+     * Find the real nsysnet accepted ranges for socket buffers instead
+     * of guessing from one 65536-byte request.
+     */
+    if (running)
+        run_buffer_matrix("SNDBUF", SO_SNDBUF);
+
+    if (running)
+        run_buffer_matrix("RCVBUF", SO_RCVBUF);
 
     if (running) {
         probe_say("--- END SOCKOPT PROBE ---");
