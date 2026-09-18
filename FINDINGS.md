@@ -868,3 +868,73 @@ test.
 
 The corrected nonblocking probe exited normally through the official
 HOME overlay -> Quit path.
+
+
+## recvfrom_ex AX TTL validation
+
+The native `recvfrom_ex` TTL behaviour has now been reproduced on the
+AX88179/lwIP path.
+
+Observed AX path:
+
+- module route: `ax`
+- AX address: `192.168.2.190`
+- title traffic explicitly reported as routed through AX88179
+- UDP source peer: `192.168.2.100:19031`
+
+### recvfrom_ex results
+
+Baseline without `MSG_IP_RECVTTL`:
+
+    flags=0
+    msglen=64
+    extra = all zero
+
+TTL cases:
+
+    expected 127 -> extra[0] = 0x7f
+    expected 200 -> extra[0] = 0xc8
+    expected 17  -> extra[0] = 0x11
+    expected 37  -> extra[0] = 0x25
+    expected 64  -> extra[0] = 0x40
+    expected 91  -> extra[0] = 0x5b
+
+For msglen > 1, bytes `extra[1..msglen-1]` are zero.
+
+Therefore the real per-datagram IPv4 TTL is successfully preserved
+through lwIP and exposed by the AX `recvfrom_ex` shim.
+
+`recvfrom_ex` TTL support is considered validated for `msglen >= 1`.
+
+### Remaining msglen=0 edge case
+
+AX currently receives the datagram successfully with:
+
+    flags=0x40
+    msglen=0
+    rc > 0
+
+The single native observation instead returned `socketlasterr=11`
+without consuming the datagram.
+
+This edge case remains pending dedicated characterization and is not yet
+considered ABI-compatible.
+
+### New getsockname discrepancy
+
+The same connected UDP probe reported:
+
+Native:
+
+    PATH local=192.168.2.124:19030
+
+AX:
+
+    PATH local=0.0.0.0:19030
+
+Traffic itself was routed correctly through AX88179, but lwIP preserves
+the wildcard bind address in `getsockname()` after UDP connect whereas
+native nsysnet exposes the selected local interface address.
+
+This is a separate observable compatibility gap and should be fixed
+without changing wildcard results for unconnected sockets.
