@@ -177,9 +177,12 @@ static atomic_int nssl_read_preview_state;
  */
 #define NET_TRACE_SLOTS 32
 
-#define NET_TRACE_SOCKET   1
-#define NET_TRACE_CONNECT  2
-#define NET_TRACE_LASTERR  3
+#define NET_TRACE_SOCKET      1
+#define NET_TRACE_CONNECT     2
+#define NET_TRACE_LASTERR     3
+#define NET_TRACE_SETSOCKOPT  4
+#define NET_TRACE_GETSOCKOPT  5
+#define NET_TRACE_CLOSE       6
 
 struct net_trace_event {
     atomic_int ready;
@@ -189,6 +192,9 @@ struct net_trace_event {
     int rc;
     int err;
     int port;
+    int level;
+    int optname;
+    int optlen;
     unsigned char ip[4];
 };
 
@@ -221,6 +227,9 @@ static void net_trace_queue(int op,
     e->rc = rc;
     e->err = err;
     e->port = 0;
+    e->level = 0;
+    e->optname = 0;
+    e->optlen = 0;
 
     e->ip[0] = 0;
     e->ip[1] = 0;
@@ -241,12 +250,49 @@ static void net_trace_queue(int op,
     atomic_store_explicit(&e->ready, 1, memory_order_release);
 }
 
+static void net_trace_queue_sockopt(int op,
+                                    int ax,
+                                    int fd,
+                                    int rc,
+                                    int err,
+                                    int level,
+                                    int optname,
+                                    int optlen)
+{
+    if (!atomic_load(&net_trace_enabled))
+        return;
+
+    unsigned slot = atomic_fetch_add(&net_trace_write, 1);
+
+    if (slot >= NET_TRACE_SLOTS)
+        return;
+
+    struct net_trace_event *e = &net_trace_events[slot];
+
+    e->op = op;
+    e->ax = ax;
+    e->fd = fd;
+    e->rc = rc;
+    e->err = err;
+    e->port = 0;
+    e->level = level;
+    e->optname = optname;
+    e->optlen = optlen;
+
+    memset(e->ip, 0, sizeof(e->ip));
+
+    atomic_store_explicit(&e->ready, 1, memory_order_release);
+}
+
 int nsysnet_shim_take_net_trace(int *op,
                                 int *ax,
                                 int *fd,
                                 int *rc,
                                 int *err,
                                 int *port,
+                                int *level,
+                                int *optname,
+                                int *optlen,
                                 unsigned char ip[4])
 {
     if (net_trace_read >= NET_TRACE_SLOTS)
@@ -263,6 +309,9 @@ int nsysnet_shim_take_net_trace(int *op,
     if (rc) *rc = e->rc;
     if (err) *err = e->err;
     if (port) *port = e->port;
+    if (level) *level = e->level;
+    if (optname) *optname = e->optname;
+    if (optlen) *optlen = e->optlen;
 
     if (ip)
         memcpy(ip, e->ip, 4);
@@ -957,7 +1006,19 @@ DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
         SHIM_TRACE(1, "setsockopt(fd=%d,NATIVE level=%d opt=0x%x len=%u)",
                    sockfd, level, optname, (unsigned)optlen);
         errno = -1;
-        return real_setsockopt(sockfd, level, optname, optval, optlen);
+
+        int r = real_setsockopt(sockfd, level, optname, optval, optlen);
+
+        net_trace_queue_sockopt(NET_TRACE_SETSOCKOPT,
+                                0,
+                                sockfd,
+                                r,
+                                -1,
+                                level,
+                                optname,
+                                (int)optlen);
+
+        return r;
     }
 
     SHIM_TRACE(1, "setsockopt(fd=%d/lwfd=%d,AX level=%d opt=0x%x len=%u)",

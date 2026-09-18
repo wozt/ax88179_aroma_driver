@@ -424,6 +424,9 @@ static int run_network(int argc, const char **argv)
             int rc;
             int err;
             int port;
+            int level;
+            int optname;
+            int optlen;
             unsigned char peer[4];
 
             while (nsysnet_shim_take_net_trace(&op,
@@ -432,6 +435,9 @@ static int run_network(int argc, const char **argv)
                                                 &rc,
                                                 &err,
                                                 &port,
+                                                &level,
+                                                &optname,
+                                                &optlen,
                                                 peer)) {
                 if (op == 1) {
                     AX_LOG("NET SOCKET path=%s fd=%d",
@@ -447,6 +453,30 @@ static int run_network(int argc, const char **argv)
                            err);
                 } else if (op == 3) {
                     AX_LOG("NET LASTERR=%d", rc);
+                } else if (op == 4) {
+                    AX_LOG("NET SETSOCKOPT path=%s fd=%d level=%d opt=0x%x len=%d rc=%d errno=%d",
+                           ax ? "AX" : "NATIVE",
+                           fd,
+                           level,
+                           optname,
+                           optlen,
+                           rc,
+                           err);
+                } else if (op == 5) {
+                    AX_LOG("NET GETSOCKOPT path=%s fd=%d level=%d opt=0x%x len=%d rc=%d errno=%d",
+                           ax ? "AX" : "NATIVE",
+                           fd,
+                           level,
+                           optname,
+                           optlen,
+                           rc,
+                           err);
+                } else if (op == 6) {
+                    AX_LOG("NET CLOSE path=%s fd=%d rc=%d errno=%d",
+                           ax ? "AX" : "NATIVE",
+                           fd,
+                           rc,
+                           err);
                 }
             }
         }

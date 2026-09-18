@@ -12,7 +12,9 @@ int nsysnet_shim_take_nssl_activity(int *fd, int *mapped, int *promote, int *res
 int nsysnet_shim_take_nssl_io(int *op, int *connection, int *result, int *bytes);
 int nsysnet_shim_take_nssl_preview(int write_side, void *out, int capacity);
 int nsysnet_shim_take_net_trace(int *op, int *ax, int *fd, int *rc,
-                                int *err, int *port, unsigned char ip[4]);
+                                int *err, int *port, int *level,
+                                int *optname, int *optlen,
+                                unsigned char ip[4]);
 int nsysnet_shim_install(void);
 void nsysnet_shim_begin_title(void);
 void nsysnet_shim_stop_accepting(void);
