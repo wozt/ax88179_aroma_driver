@@ -301,7 +301,7 @@ static int run_network(int argc, const char **argv)
                    ip && ip[0] ? ip : "IP unavailable");
         }
 
-        /* Log IP changes and status */        /* Log IP changes and status */
+        /* Log IP changes and status */
         if (ip && strcmp(ip, previous_ip)) {
             strncpy(previous_ip, ip, sizeof(previous_ip) - 1);
             AX_LOG("ready %s", ip);
