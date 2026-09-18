@@ -158,6 +158,19 @@ static atomic_uint nssl_io_write;
 static atomic_uint nssl_io_calls;
 static unsigned nssl_io_read;
 
+/*
+ * Capture the first decrypted HTTP request/response seen through NSSL.
+ * 0 = empty, -1 = producer filling it, >0 = bytes ready, -2 = consumed.
+ * No logging happens from the title thread.
+ */
+#define NSSL_PREVIEW_MAX 512
+
+static unsigned char nssl_write_preview[NSSL_PREVIEW_MAX];
+static unsigned char nssl_read_preview[NSSL_PREVIEW_MAX];
+
+static atomic_int nssl_write_preview_state;
+static atomic_int nssl_read_preview_state;
+
 void nsysnet_shim_set_trace_level(int level)
 {
     atomic_store(&shim_trace_level, level);
@@ -922,6 +935,30 @@ DECL_FUNCTION(int, socketlasterr, void)
  *
  * Absolutely no logging is performed here.
  */
+static void nssl_capture_preview(atomic_int *state,
+                                 unsigned char *dst,
+                                 const void *src,
+                                 int length)
+{
+    if (!src || length <= 0)
+        return;
+
+    int expected = 0;
+
+    if (!atomic_compare_exchange_strong(state, &expected, -1))
+        return;
+
+    int n = length;
+
+    if (n > NSSL_PREVIEW_MAX)
+        n = NSSL_PREVIEW_MAX;
+
+    memcpy(dst, src, (size_t)n);
+
+    /* Publish the length only after the copy is complete. */
+    atomic_store_explicit(state, n, memory_order_release);
+}
+
 static void nssl_io_queue(int op, int connection, int result, int bytes)
 {
     unsigned call = atomic_fetch_add(&nssl_io_calls, 1);
@@ -974,6 +1011,40 @@ int nsysnet_shim_take_nssl_io(int *op,
     nssl_io_read++;
 
     return 1;
+}
+
+int nsysnet_shim_take_nssl_preview(int write_side,
+                                   void *out,
+                                   int capacity)
+{
+    atomic_int *state = write_side
+        ? &nssl_write_preview_state
+        : &nssl_read_preview_state;
+
+    unsigned char *src = write_side
+        ? nssl_write_preview
+        : nssl_read_preview;
+
+    int n = atomic_load_explicit(state, memory_order_acquire);
+
+    if (n <= 0)
+        return 0;
+
+    if (!out || capacity <= 0)
+        return 0;
+
+    if (n > capacity)
+        n = capacity;
+
+    memcpy(out, src, (size_t)n);
+
+    /*
+     * Keep it consumed for the rest of this title. We only want the
+     * first request and first response for this comparison.
+     */
+    atomic_store(state, -2);
+
+    return n;
 }
 
 /*
@@ -1113,6 +1184,12 @@ DECL_FUNCTION(int32_t, NSSLRead,
 
     int bytes = outBytesRead ? *outBytesRead : -1;
 
+    if (result == 0 && bytes > 0)
+        nssl_capture_preview(&nssl_read_preview_state,
+                             nssl_read_preview,
+                             buffer,
+                             bytes);
+
     nssl_io_queue(NSSL_IO_READ,
                   connection,
                   result,
@@ -1133,6 +1210,12 @@ DECL_FUNCTION(int32_t, NSSLWrite,
                                     outBytesWritten);
 
     int bytes = outBytesWritten ? *outBytesWritten : -1;
+
+    if (result == 0 && bytes > 0)
+        nssl_capture_preview(&nssl_write_preview_state,
+                             nssl_write_preview,
+                             buffer,
+                             bytes);
 
     nssl_io_queue(NSSL_IO_WRITE,
                   connection,
@@ -1467,6 +1550,9 @@ void nsysnet_shim_begin_title(void) {
     atomic_store(&nssl_io_write, 0);
     atomic_store(&nssl_io_calls, 0);
     nssl_io_read = 0;
+
+    atomic_store(&nssl_write_preview_state, 0);
+    atomic_store(&nssl_read_preview_state, 0);
 
     for (int i = 0; i < NSSL_IO_SLOTS; i++)
         atomic_store(&nssl_io_events[i].ready, 0);

@@ -16,6 +16,48 @@
     WHBLogPrintf("[%llu] AX: " fmt, \
                  (unsigned long long)OSTicksToMilliseconds(OSGetTime()), ##__VA_ARGS__)
 
+static void log_nssl_preview(const char *direction,
+                             const unsigned char *data,
+                             int length)
+{
+    char line[97];
+    int pos = 0;
+
+    AX_LOG("NSSL %s preview bytes=%d", direction, length);
+
+    for (int i = 0; i < length; i++) {
+        unsigned char c = data[i];
+
+        if (c == '\r')
+            continue;
+
+        if (c == '\n') {
+            if (pos) {
+                line[pos] = 0;
+                AX_LOG("NSSL %s> %s", direction, line);
+                pos = 0;
+            }
+            continue;
+        }
+
+        if (c < 32 || c > 126)
+            c = '.';
+
+        line[pos++] = (char)c;
+
+        if (pos == (int)sizeof(line) - 1) {
+            line[pos] = 0;
+            AX_LOG("NSSL %s> %s", direction, line);
+            pos = 0;
+        }
+    }
+
+    if (pos) {
+        line[pos] = 0;
+        AX_LOG("NSSL %s> %s", direction, line);
+    }
+}
+
 #ifndef AX_DISABLE_SHIM
 #define AX_DISABLE_SHIM 0
 #endif
@@ -350,6 +392,26 @@ static int run_network(int argc, const char **argv)
                        result,
                        bytes);
             }
+        }
+
+        /*
+         * First decrypted HTTP request and response. The hooks only copy
+         * bytes into RAM; formatting/logging happens here.
+         */
+        {
+            unsigned char preview[512];
+
+            int n = nsysnet_shim_take_nssl_preview(1,
+                                                    preview,
+                                                    sizeof(preview));
+            if (n > 0)
+                log_nssl_preview("TX", preview, n);
+
+            n = nsysnet_shim_take_nssl_preview(0,
+                                                preview,
+                                                sizeof(preview));
+            if (n > 0)
+                log_nssl_preview("RX", preview, n);
         }
 
         /* Log IP changes and status */
