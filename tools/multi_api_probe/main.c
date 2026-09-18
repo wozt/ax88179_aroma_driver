@@ -58,6 +58,14 @@ typedef int (*recvfrom_multi_fn)(
     int recv_datagram_count,
     struct timeval *timeout);
 
+typedef int (*sendto_multi_fn)(
+    int socket,
+    const void *buffer,
+    int len,
+    int flags,
+    const struct sockaddr *dest_addrs,
+    int dest_count);
+
 typedef int (*sendto_multi_ex_fn)(
     int socket,
     int flags,
@@ -74,6 +82,7 @@ extern int __wut_get_nsysnet_fd(int fd);
 
 static OSDynLoad_Module nsysnet_module;
 static recvfrom_multi_fn p_recvfrom_multi;
+static sendto_multi_fn p_sendto_multi;
 static sendto_multi_ex_fn p_sendto_multi_ex;
 static socketlasterr_fn p_socketlasterr;
 
@@ -98,6 +107,18 @@ static int resolve_multi_exports(void)
 
     if (err != OS_DYNLOAD_OK || !p_recvfrom_multi) {
         probe_say("FindExport recvfrom_multi FAIL %08x",
+                  (unsigned)err);
+        return -1;
+    }
+
+    err = OSDynLoad_FindExport(
+        nsysnet_module,
+        OS_DYNLOAD_EXPORT_FUNC,
+        "sendto_multi",
+        (void **)&p_sendto_multi);
+
+    if (err != OS_DYNLOAD_OK || !p_sendto_multi) {
+        probe_say("FindExport sendto_multi FAIL %08x",
                   (unsigned)err);
         return -1;
     }
@@ -203,7 +224,7 @@ static void setup_addr(struct sockaddr_in *addr,
 
 static void test_sendto_multi_ex(void)
 {
-    probe_say("--- sendto_multi_ex ---");
+    probe_say("--- sendto_multi baseline + EX matrix ---");
 
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
 
@@ -212,55 +233,6 @@ static void test_sendto_multi_ex(void)
         return;
     }
 
-    /*
-     * Two concatenated datagrams:
-     *
-     *   "EX-A"       -> 4 bytes
-     *   "EX-BBBBB"   -> 8 bytes
-     */
-    static const char payload[]
-        __attribute__((aligned(0x20))) =
-        "EX-A"
-        "EX-BBBBB";
-
-    int lens[2]
-        __attribute__((aligned(0x20))) = {
-        4,
-        8
-    };
-
-    struct sockaddr_in dests[2]
-        __attribute__((aligned(0x20)));
-
-    setup_addr(&dests[0],
-               PC_IP,
-               TX_PORT_A);
-
-    setup_addr(&dests[1],
-               PC_IP,
-               TX_PORT_B);
-
-    int results[2]
-        __attribute__((aligned(0x20))) = {
-        0x55555555,
-        0x55555555
-    };
-
-    struct ax_sendto_multi_ex_buffers b
-        __attribute__((aligned(0x20))) = {
-        .buffer = (void *)payload,
-        .bufferlen = sizeof(payload) - 1,
-
-        .datagram_lens = lens,
-        .datagram_lens_len = 2,
-
-        .dests = (struct sockaddr *)dests,
-        .destslen = 2,
-
-        .results = results,
-        .resultslen = 2
-    };
-
     int nsfd = __wut_get_nsysnet_fd(fd);
 
     probe_say("send fd=%d raw_nsysnet_fd=%d",
@@ -268,43 +240,190 @@ static void test_sendto_multi_ex(void)
               nsfd);
 
     if (nsfd < 0) {
-        probe_say("send fd conversion FAIL errno=%d",
-                  errno);
+        probe_say("fd conversion FAIL errno=%d", errno);
         close(fd);
         return;
     }
 
-    probe_say(
-        "send align b=%02x data=%02x lens=%02x dests=%02x results=%02x",
-        (unsigned)((uintptr_t)&b & 0x1f),
-        (unsigned)((uintptr_t)payload & 0x1f),
-        (unsigned)((uintptr_t)lens & 0x1f),
-        (unsigned)((uintptr_t)dests & 0x1f),
-        (unsigned)((uintptr_t)results & 0x1f));
+    /*
+     * Huge aligned backing buffers so every tested capacity is safe.
+     */
+    static uint8_t payload[0x100]
+        __attribute__((aligned(0x40)));
+
+    static int lens[64]
+        __attribute__((aligned(0x40)));
+
+    static struct sockaddr_in dests[8]
+        __attribute__((aligned(0x40)));
+
+    static int results[64]
+        __attribute__((aligned(0x40)));
+
+    static struct ax_sendto_multi_ex_buffers b
+        __attribute__((aligned(0x40)));
+
+    memset(payload, 0, sizeof(payload));
+    memset(lens, 0, sizeof(lens));
+    memset(dests, 0, sizeof(dests));
+
+    memcpy(payload + 0, "EX-A", 4);
+    memcpy(payload + 4, "EX-BBBBB", 8);
+
+    lens[0] = 4;
+    lens[1] = 8;
+
+    setup_addr(&dests[0], PC_IP, TX_PORT_A);
+    setup_addr(&dests[1], PC_IP, TX_PORT_B);
+
+    /*
+     * First prove that raw nsysnet sendto_multi works with this fd and
+     * destination array.
+     */
+    static const char base[] = "MULTI-BASE";
 
     errno = 0;
 
-    int rc = p_sendto_multi_ex(nsfd,
-                               0,
-                               &b,
-                               2);
+    int base_rc = p_sendto_multi(
+        nsfd,
+        base,
+        sizeof(base) - 1,
+        0,
+        (const struct sockaddr *)dests,
+        2);
 
-    int err = errno;
-    int nerr = rc < 0 ? p_socketlasterr() : 0;
-
-    probe_say(
-        "sendto_multi_ex rc=%d errno=%d nsysnet_err=%d",
-        rc,
-        err,
-        nerr);
+    int base_nerr =
+        base_rc < 0 ? p_socketlasterr() : 0;
 
     probe_say(
-        "results[0]=%d results[1]=%d",
-        results[0],
-        results[1]);
+        "sendto_multi baseline rc=%d nsysnet_err=%d",
+        base_rc,
+        base_nerr);
+
+    /*
+     * Candidate meanings:
+     *
+     * bufferlen:
+     *   12    exact useful payload
+     *   0x20  payload padded to cache-line size
+     *   0x100 actual backing-buffer capacity
+     *
+     * lens/results len:
+     *   2     element count
+     *   8     byte size OR padded element count (8 ints = 0x20)
+     *   0x20  padded byte size
+     *
+     * destslen:
+     *   2     destination count
+     *   0x20  two sockaddr_in in bytes
+     *   0x40  possible extra vector padding
+     */
+    static const unsigned bufferlens[] = {
+        12,
+        0x40,
+        0x100
+    };
+
+    static const unsigned intlens[] = {
+        2,
+        16,
+        0x40
+    };
+
+    static const unsigned destlens[] = {
+        2,
+        4,
+        0x40
+    };
+
+    int attempt = 0;
+    int found = 0;
+
+    for (unsigned bi = 0;
+         bi < sizeof(bufferlens) / sizeof(bufferlens[0]);
+         bi++) {
+
+        for (unsigned li = 0;
+             li < sizeof(intlens) / sizeof(intlens[0]);
+             li++) {
+
+            for (unsigned di = 0;
+                 di < sizeof(destlens) / sizeof(destlens[0]);
+                 di++) {
+
+                for (unsigned ri = 0;
+                     ri < sizeof(intlens) / sizeof(intlens[0]);
+                     ri++) {
+
+                    attempt++;
+
+                    for (unsigned i = 0; i < 64; i++)
+                        results[i] = 0x55555555;
+
+                    memset(&b, 0, sizeof(b));
+
+                    b.buffer = payload;
+                    b.bufferlen = bufferlens[bi];
+
+                    b.datagram_lens = lens;
+                    b.datagram_lens_len = intlens[li];
+
+                    b.dests = (struct sockaddr *)dests;
+                    b.destslen = destlens[di];
+
+                    b.results = results;
+                    b.resultslen = intlens[ri];
+
+                    int rc = p_sendto_multi_ex(
+                        nsfd,
+                        0,
+                        &b,
+                        2);
+
+                    int nerr =
+                        rc < 0 ? p_socketlasterr() : 0;
+
+                    /*
+                     * Do not spam all 81 EINVAL cases.
+                     * Only print a candidate that changes behavior.
+                     */
+                    if (rc >= 0 || nerr != 11) {
+                        probe_say(
+                            "EX candidate #%d B=%u L=%u D=%u R=%u",
+                            attempt,
+                            b.bufferlen,
+                            b.datagram_lens_len,
+                            b.destslen,
+                            b.resultslen);
+
+                        probe_say(
+                            "EX rc=%d nerr=%d results=%d,%d",
+                            rc,
+                            nerr,
+                            results[0],
+                            results[1]);
+
+                        found = 1;
+                        goto matrix_done;
+                    }
+                }
+            }
+        }
+    }
+
+matrix_done:
+
+    if (!found) {
+        probe_say(
+            "EX MATRIX: all %d candidates returned EINVAL",
+            attempt);
+    } else {
+        probe_say("EX MATRIX: non-EINVAL candidate FOUND");
+    }
 
     close(fd);
 }
+
 
 static void test_recvfrom_multi(void)
 {
@@ -344,36 +463,35 @@ static void test_recvfrom_multi(void)
      * Three fixed 64-byte receive slots.
      */
     uint8_t data[3][64]
-        __attribute__((aligned(0x20)));
+        __attribute__((aligned(0x40)));
 
     memset(data, 0x55, sizeof(data));
 
-    struct sockaddr_in froms[3]
-        __attribute__((aligned(0x20)));
+    struct sockaddr_in froms[4]
+        __attribute__((aligned(0x40)));
 
     memset(froms, 0, sizeof(froms));
 
-    int results[3]
-        __attribute__((aligned(0x20))) = {
-        0x55555555,
-        0x55555555,
-        0x55555555
-    };
+    int results[16]
+        __attribute__((aligned(0x40)));
+
+    for (int i = 0; i < 8; i++)
+        results[i] = 0x55555555;
 
     struct ax_recvfrom_multi_buffers b
-        __attribute__((aligned(0x20))) = {
+        __attribute__((aligned(0x40))) = {
         .buffer = data,
         .bufferlen = sizeof(data),
 
         .froms = (struct sockaddr *)froms,
-        .fromslen = 3,
+        .fromslen = 0x40,
 
         .results = results,
-        .resultslen = 3
+        .resultslen = 0x20
     };
 
     struct timeval timeout
-        __attribute__((aligned(0x20))) = {
+        __attribute__((aligned(0x40))) = {
         .tv_sec = 10,
         .tv_usec = 0
     };
@@ -397,11 +515,11 @@ static void test_recvfrom_multi(void)
 
     probe_say(
         "recv align b=%02x data=%02x froms=%02x results=%02x timeout=%02x",
-        (unsigned)((uintptr_t)&b & 0x1f),
-        (unsigned)((uintptr_t)data & 0x1f),
-        (unsigned)((uintptr_t)froms & 0x1f),
-        (unsigned)((uintptr_t)results & 0x1f),
-        (unsigned)((uintptr_t)&timeout & 0x1f));
+        (unsigned)((uintptr_t)&b & 0x3f),
+        (unsigned)((uintptr_t)data & 0x3f),
+        (unsigned)((uintptr_t)froms & 0x3f),
+        (unsigned)((uintptr_t)results & 0x3f),
+        (unsigned)((uintptr_t)&timeout & 0x3f));
 
     errno = 0;
 
