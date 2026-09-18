@@ -2,7 +2,9 @@
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -109,12 +111,73 @@ static void show_path(int fd)
         ntohs(local.sin_port));
 }
 
+/*
+ * Network probes must never block the ProcUI thread.
+ *
+ * Wait for a datagram using zero-timeout poll() while continuing to pump
+ * ProcUI. The socket itself is also O_NONBLOCK, so recvfrom_ex cannot
+ * strand the application even if readiness changes unexpectedly.
+ */
+static int wait_for_packet(int fd, const char *name)
+{
+    OSTime deadline =
+        OSGetTime() + OSMillisecondsToTicks(5000);
+
+    while (pump() && OSGetTime() < deadline) {
+        struct pollfd pfd = {
+            .fd = fd,
+            .events = POLLIN,
+            .revents = 0
+        };
+
+        int rc = poll(&pfd, 1, 0);
+
+        if (rc < 0) {
+            probe_say(
+                "%s poll FAIL errno=%d",
+                name,
+                errno);
+            return -1;
+        }
+
+        if (rc > 0) {
+            if (pfd.revents & POLLIN)
+                return 1;
+
+            if (pfd.revents &
+                (POLLERR | POLLHUP | POLLNVAL)) {
+                probe_say(
+                    "%s poll revents=%04x",
+                    name,
+                    pfd.revents);
+                return -1;
+            }
+        }
+
+        OSSleepTicks(OSMillisecondsToTicks(10));
+    }
+
+    if (!running)
+        return 0;
+
+    probe_say(
+        "%s WAIT TIMEOUT - no datagram available",
+        name);
+
+    return -1;
+}
+
 static void run_case(
+    int fd,
     int nsfd,
     const char *name,
     int flags,
     int msglen)
 {
+    if (wait_for_packet(fd, name) <= 0)
+        return;
+
+
     static uint8_t data[128]
         __attribute__((aligned(0x40)));
 
@@ -259,6 +322,19 @@ int main(void)
         goto wait;
     }
 
+    /*
+     * Absolute safety net: even after poll() says readable, the raw
+     * recvfrom_ex call must never be able to block the ProcUI thread.
+     */
+    int fl = fcntl(fd, F_GETFL, 0);
+
+    if (fl < 0 ||
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK) != 0) {
+        probe_say("fcntl O_NONBLOCK FAIL errno=%d", errno);
+        close(fd);
+        goto wait;
+    }
+
     show_path(fd);
 
     int nsfd = __wut_get_nsysnet_fd(fd);
@@ -277,6 +353,7 @@ int main(void)
     probe_say("--- baseline: no MSG_IP_RECVTTL ---");
 
     run_case(
+        fd,
         nsfd,
         "BASE",
         0,
@@ -300,6 +377,7 @@ int main(void)
             lens[i]);
 
         run_case(
+            fd,
             nsfd,
             name,
             MSG_IP_RECVTTL,

@@ -8,7 +8,7 @@ TARGET_IP = sys.argv[1] if len(sys.argv) > 1 else "192.168.2.124"
 
 TARGET_PORT = 19030
 SOURCE_PORT = 19031
-DURATION = 30.0
+DURATION = 90.0
 
 TTLS = [17, 37, 64, 91, 127, 200]
 
