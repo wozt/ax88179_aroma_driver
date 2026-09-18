@@ -134,6 +134,110 @@ void nsysnet_shim_set_system_dns(int enabled)
 #define SHIM_TRACE(level, fmt, ...) \
     do { if (atomic_load(&shim_trace_level) >= (level)) \
         WHBLogPrintf("AX88179 shim: " fmt, ##__VA_ARGS__); } while (0)
+
+#define NETTRACE_SLOTS 32
+#define NETTRACE_TX 1
+#define NETTRACE_RX 2
+
+struct nettrace_event {
+    atomic_int state; /* 0=free, 1=being written/read, 2=ready */
+    int kind;
+    int fd;
+    int lwfd;
+    uint32_t ip;
+    uint16_t port;
+    uint16_t len;
+    int rc;
+    int err;
+    uint32_t word[4];
+};
+
+static struct nettrace_event nettrace[NETTRACE_SLOTS];
+static atomic_uint nettrace_next;
+
+static uint32_t nettrace_be32(const void *ptr)
+{
+    uint32_t v;
+    memcpy(&v, ptr, sizeof(v));
+    return lwip_ntohl(v);
+}
+
+static void nettrace_queue16(int kind,
+                             int fd,
+                             int lwfd,
+                             uint32_t ip,
+                             uint16_t port,
+                             const void *buf,
+                             int len,
+                             int rc,
+                             int err)
+{
+    if (atomic_load(&shim_trace_level) < 2 || !buf || len != 16)
+        return;
+
+    unsigned n = atomic_fetch_add_explicit(&nettrace_next, 1,
+                                           memory_order_relaxed);
+    struct nettrace_event *e = &nettrace[n % NETTRACE_SLOTS];
+
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &e->state, &expected, 1,
+            memory_order_acquire, memory_order_relaxed))
+        return;
+
+    e->kind = kind;
+    e->fd = fd;
+    e->lwfd = lwfd;
+    e->ip = ip;
+    e->port = port;
+    e->len = (uint16_t)len;
+    e->rc = rc;
+    e->err = err;
+
+    for (int i = 0; i < 4; i++)
+        e->word[i] = nettrace_be32((const uint8_t *)buf + i * 4);
+
+    atomic_store_explicit(&e->state, 2, memory_order_release);
+}
+
+void nsysnet_shim_trace_drain(void)
+{
+    if (atomic_load(&shim_trace_level) < 2)
+        return;
+
+    for (int i = 0; i < NETTRACE_SLOTS; i++) {
+        struct nettrace_event *e = &nettrace[i];
+
+        int expected = 2;
+        if (!atomic_compare_exchange_strong_explicit(
+                &e->state, &expected, 1,
+                memory_order_acquire, memory_order_relaxed))
+            continue;
+
+        uint32_t ip = e->ip;
+
+        WHBLogPrintf(
+            "AX88179 NNCS: %s fd=%d/lwfd=%d %s %u.%u.%u.%u:%u "
+            "type=%u word1=%u word2=%08x word3=%08x rc=%d errno=%d",
+            e->kind == NETTRACE_TX ? "TX" : "RX",
+            e->fd, e->lwfd,
+            e->kind == NETTRACE_TX ? "->" : "<-",
+            (ip >> 24) & 255,
+            (ip >> 16) & 255,
+            (ip >> 8) & 255,
+            ip & 255,
+            e->port,
+            e->word[0],
+            e->word[1],
+            e->word[2],
+            e->word[3],
+            e->rc,
+            e->err);
+
+        atomic_store_explicit(&e->state, 0, memory_order_release);
+    }
+}
+
 static int shim_accepts(void) { return atomic_load(&accepting_sockets); }
 static int stack_fd(int fd) { return atomic_load(&mapped_fd[fd]); }
 static void track_fd(int fd, int lwfd) {
@@ -400,8 +504,21 @@ DECL_FUNCTION(int, sendto, int sockfd, const void *buf, size_t len, int flags,
     if (!dest_addr)
         return (int)lwip_sendto(stack_fd(sockfd), buf, len, msg_flags_to_lwip(flags), NULL, 0);
     if (!sockaddr_to_lwip(&l, dest_addr, addrlen)) { errno = EAFNOSUPPORT; return -1; }
-    return (int)lwip_sendto(stack_fd(sockfd), buf, len, msg_flags_to_lwip(flags),
-                            (struct sockaddr *)&l, sizeof(l));
+
+    int r = (int)lwip_sendto(stack_fd(sockfd), buf, len,
+                             msg_flags_to_lwip(flags),
+                             (struct sockaddr *)&l, sizeof(l));
+
+    if (len == 16) {
+        nettrace_queue16(NETTRACE_TX,
+                         sockfd,
+                         stack_fd(sockfd),
+                         lwip_ntohl(l.sin_addr.s_addr),
+                         nsn_ntohs(l.sin_port),
+                         buf, (int)len, r, errno);
+    }
+
+    return r;
 }
 
 DECL_FUNCTION(int, sendto_multi,
@@ -522,9 +639,19 @@ DECL_FUNCTION(int, recvfrom_ex,
         src_addr ? (struct sockaddr *)&l : NULL,
         src_addr ? &llen : NULL);
 
-    if (r >= 0 && src_addr)
+    if (r >= 0 && src_addr) {
+        if (r == 16) {
+            nettrace_queue16(NETTRACE_RX,
+                             sockfd,
+                             stack_fd(sockfd),
+                             lwip_ntohl(l.sin_addr.s_addr),
+                             nsn_ntohs(l.sin_port),
+                             buf, r, r, errno);
+        }
+
         sockaddr_to_nsn(src_addr, addrlen,
                         (struct sockaddr *)&l, *addrlen);
+    }
 
     SHIM_TRACE(2,
                "recvfrom_ex fd=%d/lwfd=%d len=%d rc=%d errno=%d",
@@ -1106,6 +1233,11 @@ void nsysnet_shim_begin_title(void) {
     nsysnet_shim_stop_accepting();
     atomic_store(&probe_thread, 0);
     atomic_store(&open_mask, 0);
+
+    atomic_store(&nettrace_next, 0);
+    for (int i = 0; i < NETTRACE_SLOTS; i++)
+        atomic_store(&nettrace[i].state, 0);
+
     for (int i=0; i<AI_OWNED_MAX; ++i) atomic_store(&ai_owned[i], NULL);
 }
 int nsysnet_shim_begin_probe(void) {

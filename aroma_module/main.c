@@ -279,6 +279,11 @@ static int run_network(int argc, const char **argv)
 
     while (!atomic_load_explicit(&stopping, memory_order_acquire)) {
         int n = ax_net_poll();
+
+        /* Print socket traces outside the patched socket call itself.
+         * Logging from sendto() recursively enters the UDP logger. */
+        nsysnet_shim_trace_drain();
+
         const char *ip = ax_net_address();
 
         /* Log IP changes and status */
