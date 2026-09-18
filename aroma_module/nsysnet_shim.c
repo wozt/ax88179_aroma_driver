@@ -70,13 +70,45 @@ struct nsn_addrinfo {   /* wut order: canonname BEFORE addr (lwIP swaps) */
 
 #define NSN_AF_INET      2
 #define NSN_SOL_SOCKET   (-1)
-#define NSN_SO_TCPSACK   0x0200
-#define NSN_SO_RXDATA    0x1011
-#define NSN_SO_TXDATA    0x1012
-#define NSN_SO_MYADDR    0x1013
-#define NSN_SO_NBIO      0x1014
-#define NSN_SO_BIO       0x1015
-#define NSN_SO_NONBLOCK  0x1016
+#define NSN_SOL_TCP      6
+
+/* Wii U SOL_SOCKET values. Never pass these numerically to lwIP without
+ * explicit translation: identical numbers do not always mean identical
+ * options (SO_TCPSACK=0x0200 is SO_REUSEPORT in lwIP). */
+#define NSN_SO_REUSEADDR    0x0004
+#define NSN_SO_KEEPALIVE    0x0008
+#define NSN_SO_DONTROUTE    0x0010
+#define NSN_SO_BROADCAST    0x0020
+#define NSN_SO_LINGER       0x0080
+#define NSN_SO_OOBINLINE    0x0100
+#define NSN_SO_TCPSACK      0x0200
+#define NSN_SO_WINSCALE     0x0400
+#define NSN_SO_SNDBUF       0x1001
+#define NSN_SO_RCVBUF       0x1002
+#define NSN_SO_SNDLOWAT     0x1003
+#define NSN_SO_RCVLOWAT     0x1004
+#define NSN_SO_ERROR        0x1007
+#define NSN_SO_TYPE         0x1008
+#define NSN_SO_HOPCNT       0x1009
+#define NSN_SO_MAXMSG       0x1010
+#define NSN_SO_RXDATA       0x1011
+#define NSN_SO_TXDATA       0x1012
+#define NSN_SO_MYADDR       0x1013
+#define NSN_SO_NBIO         0x1014
+#define NSN_SO_BIO          0x1015
+#define NSN_SO_NONBLOCK     0x1016
+#define NSN_SO_UNKNOWN1019  0x1019
+#define NSN_SO_UNKNOWN101A  0x101A
+#define NSN_SO_UNKNOWN101B  0x101B
+#define NSN_SO_NOSLOWSTART  0x4000
+#define NSN_SO_RUSRBUF      0x10000
+
+/* Wii U SOL_TCP values. */
+#define NSN_TCP_ACKDELAYTIME 0x2001
+#define NSN_TCP_NOACKDELAY   0x2002
+#define NSN_TCP_MAXSEG       0x2003
+#define NSN_TCP_NODELAY      0x2004
+#define NSN_TCP_UNKNOWN      0x2005
 
 #define NSN_MSG_OOB       0x0001
 #define NSN_MSG_PEEK      0x0002
@@ -89,6 +121,7 @@ struct nsn_addrinfo {   /* wut order: canonname BEFORE addr (lwIP swaps) */
 #define NSN_IP_MULTICAST_LOOP  11
 #define NSN_IP_ADD_MEMBERSHIP  12
 #define NSN_IP_DROP_MEMBERSHIP 13
+#define NSN_IP_UNKNOWN         14
 
 #define AX_NATIVE_PORT_FTP     21
 #define AX_NATIVE_PORT_WIILOAD 4299
@@ -248,13 +281,70 @@ static int native_port(uint16_t net_port)
     return port == AX_NATIVE_PORT_FTP || port == AX_NATIVE_PORT_WIILOAD;
 }
 
+/*
+ * Never forward a Wii U option number directly to lwIP.
+ *
+ * Even where values currently happen to match, keeping the translation
+ * explicit protects us from collisions such as Wii U SO_TCPSACK 0x0200
+ * versus lwIP SO_REUSEPORT 0x0200.
+ */
+static int socket_opt_to_lwip(int opt)
+{
+    switch (opt) {
+    case NSN_SO_REUSEADDR: return SO_REUSEADDR;
+    case NSN_SO_KEEPALIVE: return SO_KEEPALIVE;
+    case NSN_SO_BROADCAST: return SO_BROADCAST;
+    case NSN_SO_RCVBUF:    return SO_RCVBUF;
+    case NSN_SO_ERROR:     return SO_ERROR;
+    case NSN_SO_TYPE:      return SO_TYPE;
+    default:               return -1;
+    }
+}
+
 static int ip_opt_to_lwip(int opt)
 {
     switch (opt) {
     case NSN_IP_TOS: return IP_TOS;
     case NSN_IP_TTL: return IP_TTL;
+
+    /*
+     * Multicast is deliberately not translated yet. The current lwIP
+     * build has LWIP_IGMP=0, so membership and multicast TX options are
+     * unavailable. Add these only when IGMP is enabled and the AX netif
+     * advertises the corresponding capability.
+     */
     default: return -1;
     }
+}
+
+static int tcp_opt_to_lwip(int opt)
+{
+    switch (opt) {
+    case NSN_TCP_NODELAY: return TCP_NODELAY;
+    default:              return -1;
+    }
+}
+
+static int compat_set_int(const void *optval, socklen_t optlen)
+{
+    if (!optval || optlen < sizeof(int)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int compat_get_int(void *optval, socklen_t *optlen, int value)
+{
+    if (!optval || !optlen || *optlen < sizeof(int)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    *(int *)optval = value;
+    *optlen = sizeof(int);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -753,89 +843,140 @@ DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
                sockfd, stack_fd(sockfd), level, optname, (unsigned)optlen);
 
     errno = 0;
-    int r;
 
     if (level == NSN_SOL_SOCKET) {
         switch (optname) {
         case NSN_SO_NBIO:
-            r = set_nonblocking(stack_fd(sockfd), 1);
-            break;
+            return set_nonblocking(stack_fd(sockfd), 1);
 
         case NSN_SO_BIO:
-            r = set_nonblocking(stack_fd(sockfd), 0);
-            break;
+            return set_nonblocking(stack_fd(sockfd), 0);
 
         case NSN_SO_NONBLOCK:
-            r = set_nonblocking(stack_fd(sockfd),
-                                optval && *(const int *)optval);
-            break;
+            if (compat_set_int(optval, optlen) != 0)
+                return -1;
+            return set_nonblocking(stack_fd(sockfd),
+                                   *(const int *)optval != 0);
 
+        /*
+         * Wii U exposes these switches, but our lwIP build either has no
+         * per-socket equivalent or implements the feature globally.
+         *
+         * They are performance/behaviour hints rather than requirements
+         * for TCP correctness. Accept them without accidentally mapping
+         * their numeric values to unrelated lwIP options.
+         */
         case NSN_SO_TCPSACK:
-            /*
-             * Wii U nsysnet exposes TCP SACK as a SOL_SOCKET option
-             * (0x0200). lwIP uses that numeric value for SO_REUSEPORT
-             * and has no per-socket SACK toggle, so never forward the
-             * Wii U value directly.
-             *
-             * SACK is only a TCP optimisation; accepting this option is
-             * sufficient for compatibility. If needed later, lwIP's
-             * global LWIP_TCP_SACK_OUT support can be enabled separately.
-             */
-            if (!optval || optlen < sizeof(int)) {
-                errno = EINVAL;
-                r = -1;
-            } else {
-                r = 0;
-            }
-            break;
+        case NSN_SO_WINSCALE:
+        case NSN_SO_SNDBUF:
+        case NSN_SO_SNDLOWAT:
+        case NSN_SO_OOBINLINE:
+        case NSN_SO_NOSLOWSTART:
+        case NSN_SO_MAXMSG:
+            return compat_set_int(optval, optlen);
 
-        case SO_SNDBUF:
-            /*
-             * lwIP has no per-socket SO_SNDBUF implementation.
-             * Its TX buffering is compile-time sized. nsysnet accepts
-             * this option, so treat it as a compatibility no-op.
-             */
-            if (!optval || optlen < sizeof(int)) {
+        /*
+         * WUT documents SO_LINGER as having no effect on Wii U. Our lwIP
+         * build also has LWIP_SO_LINGER disabled, so accept the ABI call
+         * without changing close behaviour.
+         */
+        case NSN_SO_LINGER:
+            if (!optval || optlen < sizeof(struct linger)) {
                 errno = EINVAL;
-                r = -1;
-            } else {
-                SHIM_TRACE(1, "SO_SNDBUF requested=%d -> compatibility no-op",
-                           *(const int *)optval);
-                r = 0;
+                return -1;
             }
-            break;
+            return 0;
 
+        /* These are query-only/custom Wii U options. */
         case NSN_SO_RXDATA:
         case NSN_SO_TXDATA:
         case NSN_SO_MYADDR:
             errno = ENOPROTOOPT;
-            r = -1;
-            break;
+            return -1;
 
-        default:
-            r = lwip_setsockopt(stack_fd(sockfd), SOL_SOCKET,
-                                optname, optval, optlen);
-            break;
+        default: {
+            int lwopt = socket_opt_to_lwip(optname);
+
+            if (lwopt < 0) {
+                SHIM_TRACE(1,
+                           "unsupported Wii U SOL_SOCKET option 0x%x",
+                           optname);
+                errno = ENOPROTOOPT;
+                return -1;
+            }
+
+            return lwip_setsockopt(stack_fd(sockfd),
+                                   SOL_SOCKET,
+                                   lwopt,
+                                   optval,
+                                   optlen);
         }
-    } else if (level == IPPROTO_IP) {
+        }
+    }
+
+    if (level == IPPROTO_IP) {
         int lwopt = ip_opt_to_lwip(optname);
 
         if (lwopt < 0) {
-            SHIM_TRACE(1, "unsupported Wii U IP option 0x%x", optname);
+            SHIM_TRACE(1,
+                       "unsupported Wii U IP option 0x%x",
+                       optname);
             errno = ENOPROTOOPT;
-            r = -1;
-        } else {
-            SHIM_TRACE(1, "IP option WiiU=%d -> lwIP=%d", optname, lwopt);
-            r = lwip_setsockopt(stack_fd(sockfd), IPPROTO_IP,
-                                lwopt, optval, optlen);
+            return -1;
         }
-    } else {
-        r = lwip_setsockopt(stack_fd(sockfd), level,
-                            optname, optval, optlen);
+
+        return lwip_setsockopt(stack_fd(sockfd),
+                               IPPROTO_IP,
+                               lwopt,
+                               optval,
+                               optlen);
     }
 
-    SHIM_TRACE(1, "setsockopt fd=%d rc=%d errno=%d", sockfd, r, errno);
-    return r;
+    if (level == NSN_SOL_TCP) {
+        switch (optname) {
+        case NSN_TCP_NODELAY:
+            return lwip_setsockopt(stack_fd(sockfd),
+                                   IPPROTO_TCP,
+                                   TCP_NODELAY,
+                                   optval,
+                                   optlen);
+
+        /*
+         * lwIP does not expose Wii U's delayed-ACK tuning through the
+         * socket API. TCP_MAXSEG is also not a per-socket lwIP option.
+         * Accept these tuning requests as compatibility hints.
+         */
+        case NSN_TCP_ACKDELAYTIME:
+        case NSN_TCP_NOACKDELAY:
+        case NSN_TCP_UNKNOWN:
+            return compat_set_int(optval, optlen);
+
+        case NSN_TCP_MAXSEG:
+            if (compat_set_int(optval, optlen) != 0)
+                return -1;
+
+            if (*(const int *)optval <= 0) {
+                errno = EINVAL;
+                return -1;
+            }
+
+            return 0;
+
+        default:
+            SHIM_TRACE(1,
+                       "unsupported Wii U TCP option 0x%x",
+                       optname);
+            errno = ENOPROTOOPT;
+            return -1;
+        }
+    }
+
+    /*
+     * Do not pass unknown levels through numerically either. A future
+     * nsysnet level may collide with an unrelated lwIP protocol level.
+     */
+    errno = ENOPROTOOPT;
+    return -1;
 }
 
 DECL_FUNCTION(int, getsockopt, int sockfd, int level, int optname,
@@ -845,42 +986,164 @@ DECL_FUNCTION(int, getsockopt, int sockfd, int level, int optname,
         errno = -1;
         return real_getsockopt(sockfd, level, optname, optval, optlen);
     }
+
     errno = 0;
+
     if (level == NSN_SOL_SOCKET) {
         switch (optname) {
         case NSN_SO_NBIO:
         case NSN_SO_NONBLOCK: {
-            if (!optval || !optlen || *optlen < 4) { errno = EINVAL; return -1; }
+            if (!optval || !optlen || *optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+
             int fl = lwip_fcntl(stack_fd(sockfd), F_GETFL, 0);
-            if (fl < 0) return -1;
+            if (fl < 0)
+                return -1;
+
             *(int *)optval = !!(fl & O_NONBLOCK);
-            *optlen = 4;
+            *optlen = sizeof(int);
             return 0;
         }
+
         case NSN_SO_RXDATA: {
-            if (!optval || !optlen || *optlen < 4) { errno = EINVAL; return -1; }
+            if (!optval || !optlen || *optlen < sizeof(int)) {
+                errno = EINVAL;
+                return -1;
+            }
+
             int v = 0;
             int r = lwip_ioctl(stack_fd(sockfd), FIONREAD, &v);
-            if (r == 0) { *(int *)optval = v; *optlen = 4; }
+
+            if (r == 0) {
+                *(int *)optval = v;
+                *optlen = sizeof(int);
+            }
+
             return r;
         }
-        case NSN_SO_MYADDR: {
-            if (!optval || !optlen || *optlen < 4) { errno = EINVAL; return -1; }
+
+        case NSN_SO_MYADDR:
+            if (!optval || !optlen || *optlen < sizeof(uint32_t)) {
+                errno = EINVAL;
+                return -1;
+            }
+
             *(uint32_t *)optval = ax_net_ip4();
-            *optlen = 4;
+            *optlen = sizeof(uint32_t);
+            return 0;
+
+        case NSN_SO_TCPSACK:
+            return compat_get_int(optval, optlen,
+                                  LWIP_TCP_SACK_OUT ? 1 : 0);
+
+        case NSN_SO_WINSCALE:
+            return compat_get_int(optval, optlen,
+                                  LWIP_WND_SCALE ? 1 : 0);
+
+        case NSN_SO_SNDBUF:
+            return compat_get_int(optval, optlen, TCP_SND_BUF);
+
+        case NSN_SO_SNDLOWAT:
+        case NSN_SO_OOBINLINE:
+        case NSN_SO_NOSLOWSTART:
+            return compat_get_int(optval, optlen, 0);
+
+        case NSN_SO_MAXMSG:
+            return compat_get_int(optval, optlen, TCP_MSS);
+
+        case NSN_SO_LINGER: {
+            if (!optval || !optlen ||
+                *optlen < sizeof(struct linger)) {
+                errno = EINVAL;
+                return -1;
+            }
+
+            struct linger *l = (struct linger *)optval;
+            l->l_onoff = 0;
+            l->l_linger = 0;
+            *optlen = sizeof(struct linger);
             return 0;
         }
+
         case NSN_SO_BIO:
-        case NSN_SO_TXDATA: errno = ENOPROTOOPT; return -1;
-        default:            {
-            int rc = lwip_getsockopt(stack_fd(sockfd), SOL_SOCKET, optname, optval, optlen);
-            if (rc == 0 && optname == SO_ERROR && optval && optlen && *optlen >= sizeof(int))
-                *(int *)optval = errno_to_nsn(*(int *)optval);
+        case NSN_SO_TXDATA:
+            errno = ENOPROTOOPT;
+            return -1;
+
+        default: {
+            int lwopt = socket_opt_to_lwip(optname);
+
+            if (lwopt < 0) {
+                errno = ENOPROTOOPT;
+                return -1;
+            }
+
+            int rc = lwip_getsockopt(stack_fd(sockfd),
+                                     SOL_SOCKET,
+                                     lwopt,
+                                     optval,
+                                     optlen);
+
+            /*
+             * lwIP reports POSIX errno numbers. nsysnet SO_ERROR returns
+             * its own socket error numbering.
+             */
+            if (rc == 0 &&
+                optname == NSN_SO_ERROR &&
+                optval &&
+                optlen &&
+                *optlen >= sizeof(int)) {
+                *(int *)optval =
+                    errno_to_nsn(*(int *)optval);
+            }
+
             return rc;
         }
         }
     }
-    return lwip_getsockopt(stack_fd(sockfd), level, optname, optval, optlen);
+
+    if (level == IPPROTO_IP) {
+        int lwopt = ip_opt_to_lwip(optname);
+
+        if (lwopt < 0) {
+            errno = ENOPROTOOPT;
+            return -1;
+        }
+
+        return lwip_getsockopt(stack_fd(sockfd),
+                               IPPROTO_IP,
+                               lwopt,
+                               optval,
+                               optlen);
+    }
+
+    if (level == NSN_SOL_TCP) {
+        switch (optname) {
+        case NSN_TCP_NODELAY:
+            return lwip_getsockopt(stack_fd(sockfd),
+                                   IPPROTO_TCP,
+                                   TCP_NODELAY,
+                                   optval,
+                                   optlen);
+
+        case NSN_TCP_MAXSEG:
+            return compat_get_int(optval, optlen, TCP_MSS);
+
+        case NSN_TCP_ACKDELAYTIME:
+        case NSN_TCP_NOACKDELAY:
+        case NSN_TCP_UNKNOWN:
+            return compat_get_int(optval, optlen, 0);
+
+        default:
+            errno = ENOPROTOOPT;
+            return -1;
+        }
+    }
+
+    errno = ENOPROTOOPT;
+    return -1;
 }
 
 DECL_FUNCTION(int, socketlasterr, void)
@@ -1001,7 +1264,6 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
 }
 
 /* ------------------------------------------------------------------ */
-/* DNS                                                                 */
 /* DNS                                                                 */
 
 DECL_FUNCTION(struct hostent *, gethostbyname, const char *name)
