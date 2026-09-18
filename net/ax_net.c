@@ -36,7 +36,7 @@
  * reached "dhcp started" and then never got an address.
  */
 
-#define TX_SLOTS 8
+#define TX_SLOTS 32
 
 static struct netif iface;
 static uint8_t rx_frame[1600];
@@ -54,6 +54,119 @@ static int current_using_cached_lease;
  * back, and does the driver report an error on either side. */
 static uint32_t stat_rx_ok, stat_rx_err, stat_tx_q, stat_tx_drop, stat_tx_ok, stat_tx_err;
 static uint32_t stat_in_ok, stat_in_drop, stat_beats, stat_rx_idle;
+
+#define WIRETRACE_SLOTS 32
+
+struct wiretrace_event {
+    uint32_t src_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint32_t type;
+    uint32_t word1;
+    uint32_t word2;
+    uint32_t word3;
+};
+
+static struct wiretrace_event wiretrace[WIRETRACE_SLOTS];
+static unsigned wiretrace_write;
+static unsigned wiretrace_read;
+
+static uint16_t wire_be16(const uint8_t *p)
+{
+    return ((uint16_t)p[0] << 8) | p[1];
+}
+
+static uint32_t wire_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) |
+           ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) |
+           p[3];
+}
+
+static void wiretrace_udp16(const uint8_t *frame, int len)
+{
+    if (!frame || len < 14)
+        return;
+
+    int l2 = 14;
+    uint16_t ethertype = wire_be16(frame + 12);
+
+    /* Handle one 802.1Q VLAN tag too, just in case. */
+    if (ethertype == 0x8100 && len >= 18) {
+        ethertype = wire_be16(frame + 16);
+        l2 = 18;
+    }
+
+    if (ethertype != 0x0800 || len < l2 + 20)
+        return;
+
+    const uint8_t *ip = frame + l2;
+
+    if ((ip[0] >> 4) != 4)
+        return;
+
+    int ihl = (ip[0] & 0x0f) * 4;
+
+    if (ihl < 20 || len < l2 + ihl + 8)
+        return;
+
+    if (ip[9] != 17)
+        return;
+
+    const uint8_t *udp = ip + ihl;
+    uint16_t udp_len = wire_be16(udp + 4);
+
+    /* UDP header 8 + NNCS message 16. */
+    if (udp_len != 24 || len < l2 + ihl + udp_len)
+        return;
+
+    const uint8_t *data = udp + 8;
+
+    /* Keep the newest events if the reader falls behind. */
+    if (wiretrace_write - wiretrace_read >= WIRETRACE_SLOTS)
+        wiretrace_read++;
+
+    struct wiretrace_event *e =
+        &wiretrace[wiretrace_write % WIRETRACE_SLOTS];
+
+    e->src_ip   = wire_be32(ip + 12);
+    e->src_port = wire_be16(udp + 0);
+    e->dst_port = wire_be16(udp + 2);
+    e->type     = wire_be32(data + 0);
+    e->word1    = wire_be32(data + 4);
+    e->word2    = wire_be32(data + 8);
+    e->word3    = wire_be32(data + 12);
+
+    wiretrace_write++;
+}
+
+void ax_net_wire_trace_drain(void)
+{
+    while (wiretrace_read != wiretrace_write) {
+        struct wiretrace_event *e =
+            &wiretrace[wiretrace_read % WIRETRACE_SLOTS];
+
+        uint32_t ip = e->src_ip;
+
+        WHBLogPrintf(
+            "AXWIRE: UDP16 <- %u.%u.%u.%u:%u -> local:%u "
+            "type=%u word1=%u word2=%08x word3=%08x",
+            (ip >> 24) & 255,
+            (ip >> 16) & 255,
+            (ip >> 8) & 255,
+            ip & 255,
+            e->src_port,
+            e->dst_port,
+            e->type,
+            e->word1,
+            e->word2,
+            e->word3);
+
+        wiretrace_read++;
+    }
+}
+
 extern uint32_t ax_fetch_calls, ax_fetch_timeouts, ax_fetch_infinite, ax_fetch_msgs;
 
 /*
@@ -254,6 +367,10 @@ int ax_net_poll(void)
     else if (n < 0) stat_rx_err++;
     else stat_rx_idle++;
     if (n > 0) {
+        /* Observe NNCS UDP packets before lwIP gets a chance to accept
+         * or discard them. No logging is done here. */
+        wiretrace_udp16(rx_frame, n);
+
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)n, PBUF_POOL);
         if (p) {
             if (pbuf_take(p, rx_frame, (u16_t)n) != ERR_OK || iface.input(p, &iface) != ERR_OK) {
@@ -356,6 +473,8 @@ void ax_net_forget(void)
     address[0] = 0;
     stat_rx_ok = stat_rx_err = stat_tx_q = stat_tx_drop = stat_tx_ok = stat_tx_err = 0;
     stat_in_ok = stat_in_drop = stat_beats = stat_rx_idle = 0;
+    wiretrace_write = 0;
+    wiretrace_read = 0;
     ax_fetch_calls = ax_fetch_timeouts = ax_fetch_infinite = ax_fetch_msgs = 0;
 }
 

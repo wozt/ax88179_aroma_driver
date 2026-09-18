@@ -8,6 +8,7 @@
 int ax_net_start(Ax88179 *ax);
 /* -2: repeated control failures, close and reopen the adapter. */
 int ax_net_poll(void);
+void ax_net_wire_trace_drain(void);
 const char *ax_net_address(void);
 void ax_net_stop(void);
 /* Call once per title, before ax_net_start: the previous title's tcpip

@@ -235,6 +235,9 @@ static int run_network(int argc, const char **argv)
     int dhcp_done = 0;
     while (!dhcp_done && OSGetTime() < dhcp_deadline) {
         int n = ax_net_poll();
+
+        /* Safe deferred traces: never log from inside sendto/recvfrom. */
+        ax_net_wire_trace_drain();
         if (n < 0) {
             if (OSGetTime() >= dhcp_deadline) break;
             OSSleepTicks(OSMillisecondsToTicks(100));
