@@ -335,8 +335,14 @@ static int run_network(int argc, const char **argv)
                                               &connection,
                                               &result,
                                               &bytes)) {
+                const char *name =
+                    op == 1 ? "READ" :
+                    op == 2 ? "WRITE" :
+                    op == 3 ? "HANDSHAKE" :
+                              "UNKNOWN";
+
                 AX_LOG("NSSL %s conn=%d rc=%d bytes=%d",
-                       op == 1 ? "READ" : "WRITE",
+                       name,
                        connection,
                        result,
                        bytes);

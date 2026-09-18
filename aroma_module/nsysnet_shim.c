@@ -140,8 +140,9 @@ static atomic_int nssl_last_result;
  * Keep the first few operations plus later errors.
  */
 #define NSSL_IO_SLOTS 16
-#define NSSL_IO_READ  1
-#define NSSL_IO_WRITE 2
+#define NSSL_IO_READ      1
+#define NSSL_IO_WRITE     2
+#define NSSL_IO_HANDSHAKE 3
 
 struct nssl_io_event {
     atomic_int ready;
@@ -1000,6 +1001,19 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
     return result;
 }
 
+DECL_FUNCTION(int32_t, NSSLDoHandshake,
+              int32_t connection)
+{
+    int32_t result = real_NSSLDoHandshake(connection);
+
+    nssl_io_queue(NSSL_IO_HANDSHAKE,
+                  connection,
+                  result,
+                  0);
+
+    return result;
+}
+
 DECL_FUNCTION(int32_t, NSSLRead,
               int32_t connection,
               void *buffer,
@@ -1322,6 +1336,7 @@ int nsysnet_shim_install(void)
      * observational only and always calls the original implementation.
      */
     SHIM_PATCH(NSSLCreateConnection);
+    SHIM_PATCH(NSSLDoHandshake);
     SHIM_PATCH(NSSLRead);
     SHIM_PATCH(NSSLWrite);
 
