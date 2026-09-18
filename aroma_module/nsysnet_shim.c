@@ -69,6 +69,7 @@ struct nsn_addrinfo {   /* wut order: canonname BEFORE addr (lwIP swaps) */
 
 #define NSN_AF_INET      2
 #define NSN_SOL_SOCKET   (-1)
+#define NSN_SO_TCPSACK   0x0200
 #define NSN_SO_RXDATA    0x1011
 #define NSN_SO_TXDATA    0x1012
 #define NSN_SO_MYADDR    0x1013
@@ -1073,6 +1074,25 @@ DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
         case NSN_SO_NONBLOCK:
             r = set_nonblocking(stack_fd(sockfd),
                                 optval && *(const int *)optval);
+            break;
+
+        case NSN_SO_TCPSACK:
+            /*
+             * Wii U nsysnet exposes TCP SACK as a SOL_SOCKET option
+             * (0x0200). lwIP uses that numeric value for SO_REUSEPORT
+             * and has no per-socket SACK toggle, so never forward the
+             * Wii U value directly.
+             *
+             * SACK is only a TCP optimisation; accepting this option is
+             * sufficient for compatibility. If needed later, lwIP's
+             * global LWIP_TCP_SACK_OUT support can be enabled separately.
+             */
+            if (!optval || optlen < sizeof(int)) {
+                errno = EINVAL;
+                r = -1;
+            } else {
+                r = 0;
+            }
             break;
 
         case SO_SNDBUF:
