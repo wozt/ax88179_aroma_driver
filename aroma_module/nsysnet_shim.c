@@ -137,9 +137,23 @@ void nsysnet_shim_set_force_native(int enabled)
     atomic_store(&force_native, enabled ? 1 : 0);
 }
 
-#define SHIM_TRACE(level, fmt, ...) \
-    do { if (atomic_load(&shim_trace_level) >= (level)) \
-        WHBLogPrintf("AX88179 shim: " fmt, ##__VA_ARGS__); } while (0)
+/*
+ * Logging must never alter the errno produced by the socket operation
+ * being instrumented. NEX often calls socketlasterr() immediately after
+ * a non-blocking operation.
+ *
+ * force_native is deliberately silent: WHBLogPrintf itself uses network
+ * sockets and could alter nsysnet's native per-thread last-error state.
+ */
+#define SHIM_TRACE(level, fmt, ...)                                      \
+    do {                                                                  \
+        if (!atomic_load(&force_native) &&                                \
+            atomic_load(&shim_trace_level) >= (level)) {                  \
+            int _saved_errno = errno;                                     \
+            WHBLogPrintf("AX88179 shim: " fmt, ##__VA_ARGS__);            \
+            errno = _saved_errno;                                         \
+        }                                                                 \
+    } while (0)
 
 #define NETTRACE_SLOTS 32
 #define NETTRACE_TX 1
@@ -178,7 +192,14 @@ static void nettrace_queue(int kind,
                              int rc,
                              int err)
 {
-    if (atomic_load(&shim_trace_level) < 2 || !buf || len <= 0)
+    /*
+     * Native comparison mode must be a true passthrough. Do not even
+     * queue traces: the reference test is about reproducing stock
+     * nsysnet behaviour exactly.
+     */
+    if (atomic_load(&force_native) ||
+        atomic_load(&shim_trace_level) < 2 ||
+        !buf || len <= 0)
         return;
 
     unsigned n = atomic_fetch_add_explicit(&nettrace_next, 1,
@@ -753,9 +774,15 @@ DECL_FUNCTION(int, recvfrom_ex,
             }
         }
 
-        SHIM_TRACE(2,
-                   "recvfrom_ex fd=%d/NATIVE len=%d flags=0x%x extra_len=%d rc=%d",
-                   sockfd, len, flags, extra_len, r);
+        /*
+         * Never log after a native recvfrom_ex in reference mode:
+         * the title may call socketlasterr() immediately afterwards.
+         */
+        if (!atomic_load(&force_native)) {
+            SHIM_TRACE(2,
+                       "recvfrom_ex fd=%d/NATIVE len=%d flags=0x%x extra_len=%d rc=%d",
+                       sockfd, len, flags, extra_len, r);
+        }
 
         return r;
     }
@@ -1071,7 +1098,16 @@ DECL_FUNCTION(int, getsockopt, int sockfd, int level, int optname,
 
 DECL_FUNCTION(int, socketlasterr, void)
 {
-    if (errno < 0) return real_socketlasterr();
+    /*
+     * In reference/native mode never infer anything from newlib errno.
+     * Return exactly what nsysnet would have returned without the shim.
+     */
+    if (atomic_load(&force_native))
+        return real_socketlasterr();
+
+    if (errno < 0)
+        return real_socketlasterr();
+
     return errno_to_nsn(errno);
 }
 
