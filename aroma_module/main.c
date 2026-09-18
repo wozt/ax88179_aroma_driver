@@ -301,6 +301,26 @@ static int run_network(int argc, const char **argv)
                    ip && ip[0] ? ip : "IP unavailable");
         }
 
+        /*
+         * NSSLCreateConnection is probed inside the title hook, but the
+         * message is emitted here so logging cannot alter the title
+         * thread's socket/NSSL state.
+         */
+        {
+            int nssl_fd;
+            int nssl_mapped;
+            int nssl_result;
+
+            if (nsysnet_shim_take_nssl_activity(&nssl_fd,
+                                                 &nssl_mapped,
+                                                 &nssl_result)) {
+                AX_LOG("NSSLCreateConnection fd=%d socket=%s rc=%d",
+                       nssl_fd,
+                       nssl_mapped ? "AX" : "NATIVE",
+                       nssl_result);
+            }
+        }
+
         /* Log IP changes and status */
         if (ip && strcmp(ip, previous_ip)) {
             strncpy(previous_ip, ip, sizeof(previous_ip) - 1);

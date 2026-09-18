@@ -123,6 +123,18 @@ static atomic_int system_dns;
 static atomic_int force_native;
 static atomic_int ax_activity_pending;
 
+/*
+ * NSSL probe.
+ *
+ * Never log from NSSLCreateConnection itself. Socket/NEX code is sensitive
+ * to logging side effects, so the hook only records what happened and the
+ * network worker prints it later.
+ */
+static atomic_int nssl_activity_pending;
+static atomic_int nssl_last_fd;
+static atomic_int nssl_last_mapped;
+static atomic_int nssl_last_result;
+
 void nsysnet_shim_set_trace_level(int level)
 {
     atomic_store(&shim_trace_level, level);
@@ -162,6 +174,24 @@ int nsysnet_shim_take_ax_activity(void)
 {
     return atomic_exchange(&ax_activity_pending, 0);
 }
+
+int nsysnet_shim_take_nssl_activity(int *fd, int *mapped, int *result)
+{
+    if (!atomic_exchange(&nssl_activity_pending, 0))
+        return 0;
+
+    if (fd)
+        *fd = atomic_load(&nssl_last_fd);
+
+    if (mapped)
+        *mapped = atomic_load(&nssl_last_mapped);
+
+    if (result)
+        *result = atomic_load(&nssl_last_result);
+
+    return 1;
+}
+
 static int stack_fd(int fd) { return atomic_load(&mapped_fd[fd]); }
 
 static void track_fd(int fd, int lwfd) {
@@ -851,6 +881,51 @@ DECL_FUNCTION(int, socketlasterr, void)
 }
 
 /* ------------------------------------------------------------------ */
+/* NSSL probe                                                          */
+
+/*
+ * NSSL operates on native nsysnet socket descriptors.
+ *
+ * Our AX sockets expose a native placeholder fd to the title while the
+ * actual connected socket lives inside lwIP. This probe establishes
+ * whether a title hands one of those AX-backed public descriptors to
+ * NSSLCreateConnection().
+ *
+ * Absolutely no logging is performed here.
+ */
+DECL_FUNCTION(int32_t, NSSLCreateConnection,
+              int32_t context,
+              const char *host,
+              int32_t hostLength,
+              int32_t options,
+              int32_t sockfd,
+              int32_t block)
+{
+    int was_ax = !is_foreign(sockfd);
+
+    int32_t result = real_NSSLCreateConnection(context,
+                                                host,
+                                                hostLength,
+                                                options,
+                                                sockfd,
+                                                block);
+
+    if (shim_accepts()) {
+        atomic_store(&nssl_last_fd, sockfd);
+        atomic_store(&nssl_last_mapped, was_ax ? 1 : 0);
+        atomic_store(&nssl_last_result, result);
+
+        /*
+         * Publish this last. The worker only reads the other fields after
+         * observing this flag.
+         */
+        atomic_store(&nssl_activity_pending, 1);
+    }
+
+    return result;
+}
+
+/* ------------------------------------------------------------------ */
 /* DNS                                                                 */
 
 DECL_FUNCTION(struct hostent *, gethostbyname, const char *name)
@@ -1125,6 +1200,12 @@ int nsysnet_shim_install(void)
     SHIM_PATCH(getpeername);
     SHIM_PATCH(socketlasterr);
 
+    /*
+     * Probe NSSL even when DNS remains native. This hook is currently
+     * observational only and always calls the original implementation.
+     */
+    SHIM_PATCH(NSSLCreateConnection);
+
     if (!atomic_load(&system_dns)) {
         SHIM_PATCH(gethostbyname);
         SHIM_PATCH(getaddrinfo);
@@ -1156,6 +1237,11 @@ void nsysnet_shim_begin_title(void) {
     atomic_store(&probe_thread, 0);
     atomic_store(&open_mask, 0);
     atomic_store(&ax_activity_pending, 0);
+
+    atomic_store(&nssl_activity_pending, 0);
+    atomic_store(&nssl_last_fd, -1);
+    atomic_store(&nssl_last_mapped, 0);
+    atomic_store(&nssl_last_result, 0);
 
     for (int i=0; i<AI_OWNED_MAX; ++i) atomic_store(&ai_owned[i], NULL);
 }
