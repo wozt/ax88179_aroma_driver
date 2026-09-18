@@ -696,3 +696,69 @@ ss -ltnup | grep 18879 || python3 -u wiiu_ethernet/test_shim_boot/echo_server.py
 ```
 
 Warning: do not use `pgrep -af 'echo_server.py' || ...`, because it may match its own shell command and therefore fail to start the server.
+
+
+## Multi-datagram nsysnet ABI
+
+Native Wii U and AX shim behavior have been validated for
+`sendto_multi`, `sendto_multi_ex` and `recvfrom_multi`.
+
+### IPC alignment
+
+The multi-datagram APIs use IOS-style buffers:
+
+- pointers aligned to `0x40`
+- exposed buffer lengths padded to `0x40`
+
+### sendto_multi
+
+One payload sent to two destinations:
+
+- payload length: 10
+- return value: 10
+- both destinations receive the complete payload
+
+Native nsysnet and AX/lwIP behave identically.
+
+### sendto_multi_ex
+
+For two datagrams of 4 and 8 bytes:
+
+- `send_datagram_count = 2`
+- buffer capacities padded to `0x40`
+- return value = `12`
+- `results[0] = 4`
+- `results[1] = 8`
+
+Native nsysnet and AX/lwIP behave identically.
+
+### recvfrom_multi
+
+For three datagrams of 6, 8 and 12 bytes:
+
+- `recv_datagram_len = 64`
+- `recv_datagram_count = 3`
+- return value = `3`
+- `results[] = { 6, 8, 12 }`
+- one source address is returned per datagram
+
+Native nsysnet and AX/lwIP behave identically.
+
+### recvfrom_multi timeout ABI
+
+Raw nsysnet does not use newlib's `struct timeval` layout.
+
+Observed:
+
+- `sizeof(struct timeval) = 16`
+- raw nsysnet timeout size = 8
+
+Raw layout:
+
+    struct nsysnet_timeval {
+        int32_t tv_sec;
+        int32_t tv_usec;
+    };
+
+Passing libc `struct timeval` directly to the raw export produced an
+effective immediate timeout.
