@@ -49,6 +49,12 @@
  * this is only a second line of defence -- but it means nsysnet would
  * have to hold seventeen sockets at once before the two ranges could
  * even touch. */
+/*
+ * Each queued UDP datagram consumes one struct netbuf.
+ * lwIP defaults MEMP_NUM_NETBUF to only 2, which caused bursts such as
+ * NEX/NNCS to keep the first two packets and silently drop the rest.
+ */
+#define MEMP_NUM_NETBUF 32
 #define MEMP_NUM_NETCONN 16
 #define LWIP_SOCKET_OFFSET 16
 #define MEMP_NUM_TCPIP_MSG_INPKT 16
@@ -70,7 +76,7 @@
 #define DEFAULT_THREAD_STACKSIZE (16 * 1024)
 #define DEFAULT_THREAD_PRIO 2
 #define DEFAULT_TCP_RECVMBOX_SIZE 16
-#define DEFAULT_UDP_RECVMBOX_SIZE 16
+#define DEFAULT_UDP_RECVMBOX_SIZE 32
 #define DEFAULT_ACCEPTMBOX_SIZE 8
 #define LWIP_SO_RCVTIMEO 1
 #define LWIP_SO_RCVBUF 1
