@@ -64,9 +64,18 @@ typedef int (*sendto_multi_ex_fn)(
     struct ax_sendto_multi_ex_buffers *buffs,
     int send_datagram_count);
 
+typedef int (*socketlasterr_fn)(void);
+
+/*
+ * socket() de WUT renvoie un fd POSIX/devoptab.
+ * Les exports nsysnet bruts attendent le fd nsysnet interne.
+ */
+extern int __wut_get_nsysnet_fd(int fd);
+
 static OSDynLoad_Module nsysnet_module;
 static recvfrom_multi_fn p_recvfrom_multi;
 static sendto_multi_ex_fn p_sendto_multi_ex;
+static socketlasterr_fn p_socketlasterr;
 
 static int resolve_multi_exports(void)
 {
@@ -101,6 +110,18 @@ static int resolve_multi_exports(void)
 
     if (err != OS_DYNLOAD_OK || !p_sendto_multi_ex) {
         probe_say("FindExport sendto_multi_ex FAIL %08x",
+                  (unsigned)err);
+        return -1;
+    }
+
+    err = OSDynLoad_FindExport(
+        nsysnet_module,
+        OS_DYNLOAD_EXPORT_FUNC,
+        "socketlasterr",
+        (void **)&p_socketlasterr);
+
+    if (err != OS_DYNLOAD_OK || !p_socketlasterr) {
+        probe_say("FindExport socketlasterr FAIL %08x",
                   (unsigned)err);
         return -1;
     }
@@ -197,16 +218,19 @@ static void test_sendto_multi_ex(void)
      *   "EX-A"       -> 4 bytes
      *   "EX-BBBBB"   -> 8 bytes
      */
-    static const char payload[] =
+    static const char payload[]
+        __attribute__((aligned(0x20))) =
         "EX-A"
         "EX-BBBBB";
 
-    int lens[2] = {
+    int lens[2]
+        __attribute__((aligned(0x20))) = {
         4,
         8
     };
 
-    struct sockaddr_in dests[2];
+    struct sockaddr_in dests[2]
+        __attribute__((aligned(0x20)));
 
     setup_addr(&dests[0],
                PC_IP,
@@ -216,12 +240,14 @@ static void test_sendto_multi_ex(void)
                PC_IP,
                TX_PORT_B);
 
-    int results[2] = {
+    int results[2]
+        __attribute__((aligned(0x20))) = {
         0x55555555,
         0x55555555
     };
 
-    struct ax_sendto_multi_ex_buffers b = {
+    struct ax_sendto_multi_ex_buffers b
+        __attribute__((aligned(0x20))) = {
         .buffer = (void *)payload,
         .bufferlen = sizeof(payload) - 1,
 
@@ -235,19 +261,42 @@ static void test_sendto_multi_ex(void)
         .resultslen = 2
     };
 
+    int nsfd = __wut_get_nsysnet_fd(fd);
+
+    probe_say("send fd=%d raw_nsysnet_fd=%d",
+              fd,
+              nsfd);
+
+    if (nsfd < 0) {
+        probe_say("send fd conversion FAIL errno=%d",
+                  errno);
+        close(fd);
+        return;
+    }
+
+    probe_say(
+        "send align b=%02x data=%02x lens=%02x dests=%02x results=%02x",
+        (unsigned)((uintptr_t)&b & 0x1f),
+        (unsigned)((uintptr_t)payload & 0x1f),
+        (unsigned)((uintptr_t)lens & 0x1f),
+        (unsigned)((uintptr_t)dests & 0x1f),
+        (unsigned)((uintptr_t)results & 0x1f));
+
     errno = 0;
 
-    int rc = p_sendto_multi_ex(fd,
+    int rc = p_sendto_multi_ex(nsfd,
                                0,
                                &b,
                                2);
 
     int err = errno;
+    int nerr = rc < 0 ? p_socketlasterr() : 0;
 
     probe_say(
-        "sendto_multi_ex rc=%d errno=%d",
+        "sendto_multi_ex rc=%d errno=%d nsysnet_err=%d",
         rc,
-        err);
+        err,
+        nerr);
 
     probe_say(
         "results[0]=%d results[1]=%d",
@@ -294,21 +343,25 @@ static void test_recvfrom_multi(void)
     /*
      * Three fixed 64-byte receive slots.
      */
-    uint8_t data[3][64];
+    uint8_t data[3][64]
+        __attribute__((aligned(0x20)));
 
     memset(data, 0x55, sizeof(data));
 
-    struct sockaddr_in froms[3];
+    struct sockaddr_in froms[3]
+        __attribute__((aligned(0x20)));
 
     memset(froms, 0, sizeof(froms));
 
-    int results[3] = {
+    int results[3]
+        __attribute__((aligned(0x20))) = {
         0x55555555,
         0x55555555,
         0x55555555
     };
 
-    struct ax_recvfrom_multi_buffers b = {
+    struct ax_recvfrom_multi_buffers b
+        __attribute__((aligned(0x20))) = {
         .buffer = data,
         .bufferlen = sizeof(data),
 
@@ -319,7 +372,8 @@ static void test_recvfrom_multi(void)
         .resultslen = 3
     };
 
-    struct timeval timeout = {
+    struct timeval timeout
+        __attribute__((aligned(0x20))) = {
         .tv_sec = 10,
         .tv_usec = 0
     };
@@ -328,9 +382,30 @@ static void test_recvfrom_multi(void)
         "waiting for 3 datagrams on UDP :%d...",
         RX_PORT);
 
+    int nsfd = __wut_get_nsysnet_fd(fd);
+
+    probe_say("recv fd=%d raw_nsysnet_fd=%d",
+              fd,
+              nsfd);
+
+    if (nsfd < 0) {
+        probe_say("recv fd conversion FAIL errno=%d",
+                  errno);
+        close(fd);
+        return;
+    }
+
+    probe_say(
+        "recv align b=%02x data=%02x froms=%02x results=%02x timeout=%02x",
+        (unsigned)((uintptr_t)&b & 0x1f),
+        (unsigned)((uintptr_t)data & 0x1f),
+        (unsigned)((uintptr_t)froms & 0x1f),
+        (unsigned)((uintptr_t)results & 0x1f),
+        (unsigned)((uintptr_t)&timeout & 0x1f));
+
     errno = 0;
 
-    int rc = p_recvfrom_multi(fd,
+    int rc = p_recvfrom_multi(nsfd,
                               0,
                               &b,
                               64,
@@ -338,11 +413,13 @@ static void test_recvfrom_multi(void)
                               &timeout);
 
     int err = errno;
+    int nerr = rc < 0 ? p_socketlasterr() : 0;
 
     probe_say(
-        "recvfrom_multi rc=%d errno=%d",
+        "recvfrom_multi rc=%d errno=%d nsysnet_err=%d",
         rc,
-        err);
+        err,
+        nerr);
 
     for (int i = 0; i < 3; i++) {
         char ip[32] = "?";
