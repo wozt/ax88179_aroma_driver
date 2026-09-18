@@ -934,12 +934,15 @@ DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
 
     if (level == NSN_SOL_TCP) {
         switch (optname) {
-        case NSN_TCP_NODELAY:
+        case NSN_TCP_NODELAY: {
+            int lwopt = tcp_opt_to_lwip(optname);
+
             return lwip_setsockopt(stack_fd(sockfd),
                                    IPPROTO_TCP,
-                                   TCP_NODELAY,
+                                   lwopt,
                                    optval,
                                    optlen);
+        }
 
         /*
          * lwIP does not expose Wii U's delayed-ACK tuning through the
@@ -1121,12 +1124,15 @@ DECL_FUNCTION(int, getsockopt, int sockfd, int level, int optname,
 
     if (level == NSN_SOL_TCP) {
         switch (optname) {
-        case NSN_TCP_NODELAY:
+        case NSN_TCP_NODELAY: {
+            int lwopt = tcp_opt_to_lwip(optname);
+
             return lwip_getsockopt(stack_fd(sockfd),
                                    IPPROTO_TCP,
-                                   TCP_NODELAY,
+                                   lwopt,
                                    optval,
                                    optlen);
+        }
 
         case NSN_TCP_MAXSEG:
             return compat_get_int(optval, optlen, TCP_MSS);
