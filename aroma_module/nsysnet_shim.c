@@ -80,6 +80,14 @@ struct nsn_addrinfo {   /* wut order: canonname BEFORE addr (lwIP swaps) */
 #define NSN_MSG_PEEK      0x0002
 #define NSN_MSG_DONTWAIT  0x0020
 
+#define NSN_IP_TOS             3
+#define NSN_IP_TTL             4
+#define NSN_IP_MULTICAST_IF    9
+#define NSN_IP_MULTICAST_TTL   10
+#define NSN_IP_MULTICAST_LOOP  11
+#define NSN_IP_ADD_MEMBERSHIP  12
+#define NSN_IP_DROP_MEMBERSHIP 13
+
 #define AX_NATIVE_PORT_FTP     21
 #define AX_NATIVE_PORT_WIILOAD 4299
 
@@ -203,6 +211,15 @@ static int native_port(uint16_t net_port)
 {
     uint16_t port = nsn_ntohs(net_port);
     return port == AX_NATIVE_PORT_FTP || port == AX_NATIVE_PORT_WIILOAD;
+}
+
+static int ip_opt_to_lwip(int opt)
+{
+    switch (opt) {
+    case NSN_IP_TOS: return IP_TOS;
+    case NSN_IP_TTL: return IP_TTL;
+    default: return -1;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -553,26 +570,81 @@ DECL_FUNCTION(int, getpeername, int sockfd, struct nsn_sockaddr *addr, socklen_t
 DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
               const void *optval, socklen_t optlen)
 {
-    SHIM_TRACE(1, "setsockopt(fd=%d,%s level=%d opt=0x%x len=%u)",
-               sockfd, is_foreign(sockfd) ? "NATIVE" : "AX",
-               level, optname, (unsigned)optlen);
     if (is_foreign(sockfd)) {
+        SHIM_TRACE(1, "setsockopt(fd=%d,NATIVE level=%d opt=0x%x len=%u)",
+                   sockfd, level, optname, (unsigned)optlen);
         errno = -1;
         return real_setsockopt(sockfd, level, optname, optval, optlen);
     }
+
+    SHIM_TRACE(1, "setsockopt(fd=%d/lwfd=%d,AX level=%d opt=0x%x len=%u)",
+               sockfd, stack_fd(sockfd), level, optname, (unsigned)optlen);
+
     errno = 0;
+    int r;
+
     if (level == NSN_SOL_SOCKET) {
         switch (optname) {
-        case NSN_SO_NBIO:     return set_nonblocking(stack_fd(sockfd), 1);
-        case NSN_SO_BIO:      return set_nonblocking(stack_fd(sockfd), 0);
-        case NSN_SO_NONBLOCK: return set_nonblocking(stack_fd(sockfd), optval && *(const int *)optval);
+        case NSN_SO_NBIO:
+            r = set_nonblocking(stack_fd(sockfd), 1);
+            break;
+
+        case NSN_SO_BIO:
+            r = set_nonblocking(stack_fd(sockfd), 0);
+            break;
+
+        case NSN_SO_NONBLOCK:
+            r = set_nonblocking(stack_fd(sockfd),
+                                optval && *(const int *)optval);
+            break;
+
+        case SO_SNDBUF:
+            /*
+             * lwIP has no per-socket SO_SNDBUF implementation.
+             * Its TX buffering is compile-time sized. nsysnet accepts
+             * this option, so treat it as a compatibility no-op.
+             */
+            if (!optval || optlen < sizeof(int)) {
+                errno = EINVAL;
+                r = -1;
+            } else {
+                SHIM_TRACE(1, "SO_SNDBUF requested=%d -> compatibility no-op",
+                           *(const int *)optval);
+                r = 0;
+            }
+            break;
+
         case NSN_SO_RXDATA:
         case NSN_SO_TXDATA:
-        case NSN_SO_MYADDR:   errno = ENOPROTOOPT; return -1; /* get-only */
-        default:              return lwip_setsockopt(stack_fd(sockfd), SOL_SOCKET, optname, optval, optlen);
+        case NSN_SO_MYADDR:
+            errno = ENOPROTOOPT;
+            r = -1;
+            break;
+
+        default:
+            r = lwip_setsockopt(stack_fd(sockfd), SOL_SOCKET,
+                                optname, optval, optlen);
+            break;
         }
+    } else if (level == IPPROTO_IP) {
+        int lwopt = ip_opt_to_lwip(optname);
+
+        if (lwopt < 0) {
+            SHIM_TRACE(1, "unsupported Wii U IP option 0x%x", optname);
+            errno = ENOPROTOOPT;
+            r = -1;
+        } else {
+            SHIM_TRACE(1, "IP option WiiU=%d -> lwIP=%d", optname, lwopt);
+            r = lwip_setsockopt(stack_fd(sockfd), IPPROTO_IP,
+                                lwopt, optval, optlen);
+        }
+    } else {
+        r = lwip_setsockopt(stack_fd(sockfd), level,
+                            optname, optval, optlen);
     }
-    return lwip_setsockopt(stack_fd(sockfd), level, optname, optval, optlen);
+
+    SHIM_TRACE(1, "setsockopt fd=%d rc=%d errno=%d", sockfd, r, errno);
+    return r;
 }
 
 DECL_FUNCTION(int, getsockopt, int sockfd, int level, int optname,
