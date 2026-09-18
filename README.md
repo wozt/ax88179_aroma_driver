@@ -32,6 +32,10 @@ The project provides a native AX88179 USB driver, a dedicated **lwIP network sta
 * [x] Network worker stop/restart across title transitions while retaining the first successful DHCP configuration for the current Aroma session.
 * [x] Fast warm PHY reopen across title transitions, with PHY validation and automatic cold-reset fallback.
 * [x] Compact timestamped module/PHY diagnostics and configurable shim tracing.
+* [x] Minecraft: Wii U Edition networking through the AX88179/lwIP path
+* [x] Pretendo compatibility with native/system DNS retained for Inkay
+* [x] Minecraft map creation successfully validated with `route=ax` and `shim_trace=0`
+* [x] Diagnostic `route=native` mode for comparison with the original Wii U networking stack
 
 
 ### Experimental / incomplete

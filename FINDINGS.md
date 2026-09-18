@@ -1,6 +1,149 @@
 # AX88179 Wii U Aroma - Current Findings
 
-Date: 2026-09-17
+## Major validation — Minecraft + Pretendo through AX88179 (2026-09-18)
+
+The GAME-process `nsysnet` shim has now been validated with a real commercial Wii U title.
+
+**Minecraft: Wii U Edition successfully reached gameplay and created a map while its game sockets were routed through the AX88179/lwIP stack, with Pretendo active.**
+
+Validated runtime configuration:
+
+```ini
+[dhcp]
+mode=keep_first
+
+[debug]
+shim_trace=0
+
+[compat]
+dns=system
+route=ax
+```
+
+In this configuration:
+
+* IPv4 game sockets created through the intercepted `nsysnet` API are routed through lwIP and the AX88179 USB Ethernet adapter.
+* DNS remains on the native Wii U networking stack so Inkay/Pretendo DNS handling continues to work.
+* FTP port `21` and wiiload port `4299` remain native by design.
+* This is therefore currently a hybrid setup: supported game sockets use AX/lwIP, while selected Wii U system networking remains native.
+
+### lwIP UDP netbuf pool bug
+
+During the Minecraft/Pretendo NAT-check sequence, raw Ethernet tracing showed that multiple UDP replies physically reached the AX88179, but initially only the first two reached the application socket.
+
+The cause was lwIP's default netbuf pool size:
+
+```c
+MEMP_NUM_NETBUF = 2
+```
+
+Each queued UDP datagram consumes one `struct netbuf`. The stack could therefore retain only two datagrams from the NNCS burst even though the UDP receive mailbox itself was larger.
+
+The current configuration is:
+
+```c
+#define MEMP_NUM_NETBUF 32
+#define DEFAULT_UDP_RECVMBOX_SIZE 32
+```
+
+After this change, Minecraft received the complete observed NNCS burst instead of only the first two packets.
+
+### Pretendo NNCS observations
+
+Minecraft performs an NNCS/NAT-check sequence using UDP port `59941`.
+
+Observed requests included:
+
+* type `101` to NNCS1 port `10025`;
+* type `102` to NNCS1 port `10025`;
+* type `103` to NNCS2 port `10025`;
+* additional traffic to ports `33334` and `33335`.
+
+On both the custom AX path and the native Wii U network path:
+
+* five type `101` replies were received;
+* no type `102` reply reached the console;
+* five type `103` replies were received.
+
+Because the same missing type `102` behavior occurs on the known-working native Wii U network path, the absence of the type `102` reply is **not the Minecraft failure condition on this network**.
+
+After the NNCS phase, Minecraft also sends three UDP datagrams to NNCS1 port `33335`.
+
+Pretendo intentionally treats port `33335` as a sinkhole and does not reply, so the lack of a response there is expected.
+
+### Debug logging can break NEX
+
+A major debugging trap was discovered while investigating Minecraft.
+
+With verbose socket tracing enabled, Minecraft failed during its NEX networking sequence even when `route=native` forced the game sockets through the original Wii U networking stack.
+
+Once native comparison mode was made silent, Minecraft worked normally again.
+
+The same test was then repeated with:
+
+```ini
+route=ax
+shim_trace=0
+```
+
+and Minecraft successfully entered gameplay and created a map through the AX88179 path.
+
+This established that the final Minecraft failure was caused by the debugging instrumentation rather than by the actual AX network transport.
+
+NEX frequently performs a non-blocking socket operation and then immediately queries `socketlasterr()`. Logging from inside or immediately after a socket hook can itself perform networking and alter timing or last-error state.
+
+Rules established from this result:
+
+* Do not call `WHBLogPrintf` directly from timing-sensitive socket paths when validating games.
+* Do not insert logging between a failed native socket operation and a later `socketlasterr()` call.
+* Packet-level NNCS/NEX traces should not be enabled during normal gameplay.
+* Use `shim_trace=0` for normal game compatibility.
+* Prefer RAM counters, deferred traces, or worker-thread logging for future debugging.
+* A one-shot deferred message indicating that a title created an AX-backed socket can be used to confirm routing without packet-level tracing.
+
+### Native comparison mode
+
+A diagnostic mode is available through:
+
+```ini
+route=native
+```
+
+This forces newly created game sockets back through the original Wii U network stack.
+
+It is useful for comparison against:
+
+```ini
+route=ax
+```
+
+For native comparison tests to be meaningful, socket tracing must remain silent because the instrumentation itself can affect game behavior.
+
+### Current compatibility milestone
+
+As of 2026-09-18, the following path is validated:
+
+```text
+Minecraft: Wii U Edition
+        ↓
+nsysnet GAME-process hooks
+        ↓
+lwIP sockets
+        ↓
+AX88179 driver
+        ↓
+USB Ethernet
+        ↓
+Pretendo networking
+        ↓
+Minecraft gameplay / map creation
+```
+
+This is the first validated commercial-game networking result for the driver.
+
+It does not yet prove compatibility with every Wii U title or with system services such as NSSL, the Wii U Browser, eShop, or Wii U Menu networking.
+
+
 
 ## Current validated state — 2026-09-17
 
