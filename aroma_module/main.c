@@ -289,14 +289,17 @@ static int run_network(int argc, const char **argv)
     while (!atomic_load_explicit(&stopping, memory_order_acquire)) {
         int n = ax_net_poll();
 
-        /*
-         * Deferred traces only: logging directly from sendto()/recvfrom()
-         * can recursively enter the UDP logger.
-         */
-        ax_net_wire_trace_drain();
-        nsysnet_shim_trace_drain();
-
         const char *ip = ax_net_address();
+
+        /*
+         * Socket hooks only set an atomic flag. Logging happens here on
+         * the worker thread so it cannot disturb the title's
+         * socketlasterr() state.
+         */
+        if (nsysnet_shim_take_ax_activity()) {
+            AX_LOG("title traffic routed through AX88179 (%s)",
+                   ip && ip[0] ? ip : "IP unavailable");
+        }
 
         /* Log IP changes and status */
         if (ip && strcmp(ip, previous_ip)) {

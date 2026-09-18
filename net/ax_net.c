@@ -55,137 +55,6 @@ static int current_using_cached_lease;
 static uint32_t stat_rx_ok, stat_rx_err, stat_tx_q, stat_tx_drop, stat_tx_ok, stat_tx_err;
 static uint32_t stat_in_ok, stat_in_drop, stat_beats, stat_rx_idle;
 
-#define WIRETRACE_SLOTS 64
-#define WIRETRACE_PORT 59941
-
-struct wiretrace_event {
-    uint32_t src_ip;
-    uint16_t src_port;
-    uint16_t dst_port;
-    uint16_t payload_len;
-    uint16_t frame_len;
-    uint32_t word0;
-    uint32_t word1;
-    uint32_t word2;
-    uint32_t word3;
-};
-
-static struct wiretrace_event wiretrace[WIRETRACE_SLOTS];
-static unsigned wiretrace_write;
-static unsigned wiretrace_read;
-
-static uint16_t wire_be16(const uint8_t *p)
-{
-    return ((uint16_t)p[0] << 8) | p[1];
-}
-
-static uint32_t wire_be32(const uint8_t *p)
-{
-    return ((uint32_t)p[0] << 24) |
-           ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) |
-           p[3];
-}
-
-/*
- * Observe every incoming UDP datagram addressed to Minecraft/NEX port
- * 59941 before lwIP sees it.
- *
- * No logging is done here: this runs in the RX path. Events are printed
- * later by ax_net_wire_trace_drain().
- */
-static void wiretrace_udp_59941(const uint8_t *frame, int len)
-{
-    if (!frame || len < 14)
-        return;
-
-    int l2 = 14;
-    uint16_t ethertype = wire_be16(frame + 12);
-
-    if (ethertype == 0x8100 && len >= 18) {
-        ethertype = wire_be16(frame + 16);
-        l2 = 18;
-    }
-
-    if (ethertype != 0x0800 || len < l2 + 20)
-        return;
-
-    const uint8_t *ip = frame + l2;
-
-    if ((ip[0] >> 4) != 4)
-        return;
-
-    int ihl = (ip[0] & 0x0f) * 4;
-
-    if (ihl < 20 || len < l2 + ihl + 8)
-        return;
-
-    if (ip[9] != 17)
-        return;
-
-    const uint8_t *udp = ip + ihl;
-
-    uint16_t src_port = wire_be16(udp + 0);
-    uint16_t dst_port = wire_be16(udp + 2);
-    uint16_t udp_len  = wire_be16(udp + 4);
-
-    if (dst_port != WIRETRACE_PORT)
-        return;
-
-    if (udp_len < 8 || len < l2 + ihl + udp_len)
-        return;
-
-    const uint8_t *data = udp + 8;
-    unsigned payload_len = udp_len - 8;
-
-    if (wiretrace_write - wiretrace_read >= WIRETRACE_SLOTS)
-        wiretrace_read++;
-
-    struct wiretrace_event *e =
-        &wiretrace[wiretrace_write % WIRETRACE_SLOTS];
-
-    e->src_ip = wire_be32(ip + 12);
-    e->src_port = src_port;
-    e->dst_port = dst_port;
-    e->payload_len = payload_len;
-    e->frame_len = len;
-
-    e->word0 = payload_len >= 4  ? wire_be32(data + 0)  : 0;
-    e->word1 = payload_len >= 8  ? wire_be32(data + 4)  : 0;
-    e->word2 = payload_len >= 12 ? wire_be32(data + 8)  : 0;
-    e->word3 = payload_len >= 16 ? wire_be32(data + 12) : 0;
-
-    wiretrace_write++;
-}
-
-void ax_net_wire_trace_drain(void)
-{
-    while (wiretrace_read != wiretrace_write) {
-        struct wiretrace_event *e =
-            &wiretrace[wiretrace_read % WIRETRACE_SLOTS];
-
-        uint32_t ip = e->src_ip;
-
-        WHBLogPrintf(
-            "AXWIRE: UDP <- %u.%u.%u.%u:%u -> local:%u "
-            "bytes=%u frame=%u first=%08x %08x %08x %08x",
-            (ip >> 24) & 255,
-            (ip >> 16) & 255,
-            (ip >> 8) & 255,
-            ip & 255,
-            e->src_port,
-            e->dst_port,
-            e->payload_len,
-            e->frame_len,
-            e->word0,
-            e->word1,
-            e->word2,
-            e->word3);
-
-        wiretrace_read++;
-    }
-}
-
 extern uint32_t ax_fetch_calls, ax_fetch_timeouts, ax_fetch_infinite, ax_fetch_msgs;
 
 /*
@@ -386,10 +255,6 @@ int ax_net_poll(void)
     else if (n < 0) stat_rx_err++;
     else stat_rx_idle++;
     if (n > 0) {
-        /* Observe all UDP traffic addressed to the NEX gameplay port
-         * before lwIP gets a chance to accept or discard it. */
-        wiretrace_udp_59941(rx_frame, n);
-
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)n, PBUF_POOL);
         if (p) {
             if (pbuf_take(p, rx_frame, (u16_t)n) != ERR_OK || iface.input(p, &iface) != ERR_OK) {
@@ -492,8 +357,6 @@ void ax_net_forget(void)
     address[0] = 0;
     stat_rx_ok = stat_rx_err = stat_tx_q = stat_tx_drop = stat_tx_ok = stat_tx_err = 0;
     stat_in_ok = stat_in_drop = stat_beats = stat_rx_idle = 0;
-    wiretrace_write = 0;
-    wiretrace_read = 0;
     ax_fetch_calls = ax_fetch_timeouts = ax_fetch_infinite = ax_fetch_msgs = 0;
 }
 

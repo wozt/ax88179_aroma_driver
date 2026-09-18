@@ -121,6 +121,7 @@ static atomic_int probe_owns_accepting;
 static atomic_int shim_trace_level;
 static atomic_int system_dns;
 static atomic_int force_native;
+static atomic_int ax_activity_pending;
 
 void nsysnet_shim_set_trace_level(int level)
 {
@@ -155,148 +156,13 @@ void nsysnet_shim_set_force_native(int enabled)
         }                                                                 \
     } while (0)
 
-#define NETTRACE_SLOTS 32
-#define NETTRACE_TX 1
-#define NETTRACE_RX 2
-
-struct nettrace_event {
-    atomic_int state; /* 0=free, 1=being written/read, 2=ready */
-    int kind;
-    int fd;
-    int lwfd;
-    uint32_t ip;
-    uint16_t port;
-    uint16_t len;
-    int rc;
-    int err;
-    uint32_t word[4];
-};
-
-static struct nettrace_event nettrace[NETTRACE_SLOTS];
-static atomic_uint nettrace_next;
-
-static uint32_t nettrace_be32(const void *ptr)
-{
-    uint32_t v;
-    memcpy(&v, ptr, sizeof(v));
-    return lwip_ntohl(v);
-}
-
-static void nettrace_queue(int kind,
-                             int fd,
-                             int lwfd,
-                             uint32_t ip,
-                             uint16_t port,
-                             const void *buf,
-                             int len,
-                             int rc,
-                             int err)
-{
-    /*
-     * Native comparison mode must be a true passthrough. Do not even
-     * queue traces: the reference test is about reproducing stock
-     * nsysnet behaviour exactly.
-     */
-    if (atomic_load(&force_native) ||
-        atomic_load(&shim_trace_level) < 2 ||
-        !buf || len <= 0)
-        return;
-
-    unsigned n = atomic_fetch_add_explicit(&nettrace_next, 1,
-                                           memory_order_relaxed);
-    struct nettrace_event *e = &nettrace[n % NETTRACE_SLOTS];
-
-    int expected = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &e->state, &expected, 1,
-            memory_order_acquire, memory_order_relaxed))
-        return;
-
-    e->kind = kind;
-    e->fd = fd;
-    e->lwfd = lwfd;
-    e->ip = ip;
-    e->port = port;
-    e->len = (uint16_t)len;
-    e->rc = rc;
-    e->err = err;
-
-    for (int i = 0; i < 4; i++) {
-        if (len >= (i + 1) * 4)
-            e->word[i] = nettrace_be32((const uint8_t *)buf + i * 4);
-        else
-            e->word[i] = 0;
-    }
-
-    atomic_store_explicit(&e->state, 2, memory_order_release);
-}
-
-void nsysnet_shim_trace_drain(void)
-{
-    if (atomic_load(&shim_trace_level) < 2)
-        return;
-
-    for (int i = 0; i < NETTRACE_SLOTS; i++) {
-        struct nettrace_event *e = &nettrace[i];
-
-        int expected = 2;
-        if (!atomic_compare_exchange_strong_explicit(
-                &e->state, &expected, 1,
-                memory_order_acquire, memory_order_relaxed))
-            continue;
-
-        uint32_t ip = e->ip;
-
-        WHBLogPrintf(
-            "AX88179 NEX: %s fd=%d/lwfd=%d %s %u.%u.%u.%u:%u "
-            "bytes=%u first=%08x %08x %08x %08x rc=%d errno=%d",
-            e->kind == NETTRACE_TX ? "TX" : "RX",
-            e->fd, e->lwfd,
-            e->kind == NETTRACE_TX ? "->" : "<-",
-            (ip >> 24) & 255,
-            (ip >> 16) & 255,
-            (ip >> 8) & 255,
-            ip & 255,
-            e->port,
-            (unsigned)e->len,
-            e->word[0],
-            e->word[1],
-            e->word[2],
-            e->word[3],
-            e->rc,
-            e->err);
-
-        atomic_store_explicit(&e->state, 0, memory_order_release);
-    }
-}
-
 static int shim_accepts(void) { return atomic_load(&accepting_sockets); }
+
+int nsysnet_shim_take_ax_activity(void)
+{
+    return atomic_exchange(&ax_activity_pending, 0);
+}
 static int stack_fd(int fd) { return atomic_load(&mapped_fd[fd]); }
-
-static int stack_local_port(int lwfd)
-{
-    struct sockaddr_in a;
-    socklen_t alen = sizeof(a);
-
-    if (lwip_getsockname(lwfd, (struct sockaddr *)&a, &alen) < 0)
-        return -1;
-
-    return nsn_ntohs(a.sin_port);
-}
-
-static void stack_peer(int lwfd, uint32_t *ip, uint16_t *port)
-{
-    struct sockaddr_in a;
-    socklen_t alen = sizeof(a);
-
-    *ip = 0;
-    *port = 0;
-
-    if (lwip_getpeername(lwfd, (struct sockaddr *)&a, &alen) == 0) {
-        *ip = lwip_ntohl(a.sin_addr.s_addr);
-        *port = nsn_ntohs(a.sin_port);
-    }
-}
 
 static void track_fd(int fd, int lwfd) {
     atomic_store(&mapped_fd[fd], lwfd);
@@ -349,25 +215,6 @@ static socklen_t sockaddr_to_lwip(struct sockaddr_in *out, const struct nsn_sock
     return sizeof(*out);
 }
 
-
-static int nsn_sockaddr_parts(const struct nsn_sockaddr *in,
-                              uint32_t *ip,
-                              uint16_t *port)
-{
-    if (!in || in->sa_family != NSN_AF_INET)
-        return 0;
-
-    const struct nsn_sockaddr_in *n =
-        (const struct nsn_sockaddr_in *)in;
-
-    if (ip)
-        *ip = lwip_ntohl(n->sin_addr);
-
-    if (port)
-        *port = nsn_ntohs(n->sin_port);
-
-    return 1;
-}
 
 static socklen_t sockaddr_to_nsn(struct nsn_sockaddr *out, socklen_t *outlen,
                                  const struct sockaddr *in, socklen_t cap)
@@ -445,6 +292,7 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
         return -1;
     }
     track_fd(fd, s);
+    atomic_store(&ax_activity_pending, 1);
     SHIM_TRACE(1, "socket(%d,%d,%d) -> AX fd=%d lwfd=%d", domain, type, protocol, fd, s);
     return fd;
 }
@@ -573,24 +421,8 @@ DECL_FUNCTION(int, send, int sockfd, const void *buf, size_t len, int flags)
     }
 
     errno = 0;
-
-    int lwfd = stack_fd(sockfd);
-    int r = (int)lwip_send(lwfd, buf, len, msg_flags_to_lwip(flags));
-
-    if (stack_local_port(lwfd) == 59941) {
-        uint32_t ip;
-        uint16_t port;
-
-        stack_peer(lwfd, &ip, &port);
-
-        nettrace_queue(NETTRACE_TX,
-                       sockfd, lwfd,
-                       ip, port,
-                       buf, (int)len,
-                       r, errno);
-    }
-
-    return r;
+    return (int)lwip_send(stack_fd(sockfd), buf, len,
+                          msg_flags_to_lwip(flags));
 }
 
 DECL_FUNCTION(int, sendto, int sockfd, const void *buf, size_t len, int flags,
@@ -598,64 +430,25 @@ DECL_FUNCTION(int, sendto, int sockfd, const void *buf, size_t len, int flags,
 {
     if (is_foreign(sockfd)) {
         errno = -1;
-
-        int r = real_sendto(sockfd, buf, len, flags,
-                            dest_addr, addrlen);
-
-        uint32_t ip = 0;
-        uint16_t port = 0;
-
-        if (buf && dest_addr &&
-            nsn_sockaddr_parts(dest_addr, &ip, &port) &&
-            (len == 16 || port == 33335)) {
-            nettrace_queue(NETTRACE_TX,
-                           sockfd, -1,
-                           ip, port,
-                           buf, (int)len,
-                           r, 0);
-        }
-
-        return r;
+        return real_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
     }
 
     errno = 0;
 
-    int lwfd = stack_fd(sockfd);
-    uint32_t trace_ip = 0;
-    uint16_t trace_port = 0;
-    int r;
+    if (!dest_addr)
+        return (int)lwip_sendto(stack_fd(sockfd), buf, len,
+                                msg_flags_to_lwip(flags), NULL, 0);
 
-    if (!dest_addr) {
-        r = (int)lwip_sendto(lwfd, buf, len,
-                             msg_flags_to_lwip(flags),
-                             NULL, 0);
+    struct sockaddr_in l;
 
-        stack_peer(lwfd, &trace_ip, &trace_port);
-    } else {
-        struct sockaddr_in l;
-
-        if (!sockaddr_to_lwip(&l, dest_addr, addrlen)) {
-            errno = EAFNOSUPPORT;
-            return -1;
-        }
-
-        r = (int)lwip_sendto(lwfd, buf, len,
-                             msg_flags_to_lwip(flags),
-                             (struct sockaddr *)&l, sizeof(l));
-
-        trace_ip = lwip_ntohl(l.sin_addr.s_addr);
-        trace_port = nsn_ntohs(l.sin_port);
+    if (!sockaddr_to_lwip(&l, dest_addr, addrlen)) {
+        errno = EAFNOSUPPORT;
+        return -1;
     }
 
-    if (stack_local_port(lwfd) == 59941) {
-        nettrace_queue(NETTRACE_TX,
-                       sockfd, lwfd,
-                       trace_ip, trace_port,
-                       buf, (int)len,
-                       r, errno);
-    }
-
-    return r;
+    return (int)lwip_sendto(stack_fd(sockfd), buf, len,
+                            msg_flags_to_lwip(flags),
+                            (struct sockaddr *)&l, sizeof(l));
 }
 
 DECL_FUNCTION(int, sendto_multi,
@@ -685,28 +478,12 @@ DECL_FUNCTION(int, sendto_multi,
             return -1;
         }
 
-        int lwfd = stack_fd(sockfd);
-
-        int r = (int)lwip_sendto(lwfd,
+        int r = (int)lwip_sendto(stack_fd(sockfd),
                                  buf,
                                  len,
                                  msg_flags_to_lwip(flags),
                                  (struct sockaddr *)&l,
                                  sizeof(l));
-
-        if (stack_local_port(lwfd) == 59941) {
-            nettrace_queue(NETTRACE_TX,
-                           sockfd, lwfd,
-                           lwip_ntohl(l.sin_addr.s_addr),
-                           nsn_ntohs(l.sin_port),
-                           buf, len,
-                           r, errno);
-        }
-
-        SHIM_TRACE(2,
-                   "sendto_multi fd=%d/lwfd=%d dst=%d/%d len=%d rc=%d errno=%d",
-                   sockfd, stack_fd(sockfd),
-                   i + 1, dest_count, len, r, errno);
 
         if (r < 0)
             return -1;
@@ -757,34 +534,8 @@ DECL_FUNCTION(int, recvfrom_ex,
 {
     if (is_foreign(sockfd)) {
         errno = -1;
-
-        int r = real_recvfrom_ex(sockfd, buf, len, flags,
-                                 src_addr, addrlen, extra, extra_len);
-
-        if (r == 16 && src_addr) {
-            uint32_t ip = 0;
-            uint16_t port = 0;
-
-            if (nsn_sockaddr_parts(src_addr, &ip, &port)) {
-                nettrace_queue(NETTRACE_RX,
-                               sockfd, -1,
-                               ip, port,
-                               buf, r,
-                               r, 0);
-            }
-        }
-
-        /*
-         * Never log after a native recvfrom_ex in reference mode:
-         * the title may call socketlasterr() immediately afterwards.
-         */
-        if (!atomic_load(&force_native)) {
-            SHIM_TRACE(2,
-                       "recvfrom_ex fd=%d/NATIVE len=%d flags=0x%x extra_len=%d rc=%d",
-                       sockfd, len, flags, extra_len, r);
-        }
-
-        return r;
+        return real_recvfrom_ex(sockfd, buf, len, flags,
+                                src_addr, addrlen, extra, extra_len);
     }
 
     errno = 0;
@@ -795,8 +546,9 @@ DECL_FUNCTION(int, recvfrom_ex,
     }
 
     /*
-     * Wii U extension: flag 0x40 requests the received packet TTL
-     * through the extra data byte.
+     * Wii U extension: flag 0x40 requests the received packet TTL.
+     * We currently provide a compatibility placeholder rather than the
+     * true received IP TTL.
      */
     if ((flags & 0x40) && extra && extra_len >= 1)
         ((uint8_t *)extra)[0] = 64;
@@ -813,22 +565,9 @@ DECL_FUNCTION(int, recvfrom_ex,
         src_addr ? &llen : NULL);
 
     if (r >= 0 && src_addr) {
-        if (r == 16) {
-            nettrace_queue(NETTRACE_RX,
-                             sockfd,
-                             stack_fd(sockfd),
-                             lwip_ntohl(l.sin_addr.s_addr),
-                             nsn_ntohs(l.sin_port),
-                             buf, r, r, errno);
-        }
-
         sockaddr_to_nsn(src_addr, addrlen,
                         (struct sockaddr *)&l, *addrlen);
     }
-
-    SHIM_TRACE(2,
-               "recvfrom_ex fd=%d/lwfd=%d len=%d flags=0x%x extra_len=%d rc=%d errno=%d",
-               sockfd, stack_fd(sockfd), len, flags, extra_len, r, errno);
 
     return r;
 }
@@ -1416,10 +1155,7 @@ void nsysnet_shim_begin_title(void) {
     nsysnet_shim_stop_accepting();
     atomic_store(&probe_thread, 0);
     atomic_store(&open_mask, 0);
-
-    atomic_store(&nettrace_next, 0);
-    for (int i = 0; i < NETTRACE_SLOTS; i++)
-        atomic_store(&nettrace[i].state, 0);
+    atomic_store(&ax_activity_pending, 0);
 
     for (int i=0; i<AI_OWNED_MAX; ++i) atomic_store(&ai_owned[i], NULL);
 }
