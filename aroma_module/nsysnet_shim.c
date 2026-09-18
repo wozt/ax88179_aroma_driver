@@ -326,6 +326,35 @@ static int ip_opt_to_lwip(int opt)
     }
 }
 
+/*
+ * Keep nn_ac consistent with the socket shim.
+ *
+ * NEX queries nn::ac::GetAssignedAddress() independently of nsysnet.
+ * When title sockets are routed through AX88179, returning the native
+ * Wi-Fi address here would give the title two different local IPs.
+ */
+DECL_FUNCTION(int32_t, ac_get_assigned_address, uint32_t *ip)
+{
+    int32_t rc = real_ac_get_assigned_address(ip);
+    uint32_t native_ip = ip ? *ip : 0;
+
+    if (rc >= 0 && ip && shim_accepts() && ax_net_stack_ready()) {
+        uint32_t ax_ip = ax_net_ip4();
+
+        if (ax_ip != 0) {
+            *ip = ax_ip;
+
+            SHIM_TRACE(1,
+                       "nn_ac GetAssignedAddress native=%08x -> AX=%08x rc=%08x",
+                       (unsigned)native_ip,
+                       (unsigned)ax_ip,
+                       (unsigned)rc);
+        }
+    }
+
+    return rc;
+}
+
 /* ------------------------------------------------------------------ */
 /* sockets                                                             */
 
@@ -654,8 +683,8 @@ DECL_FUNCTION(int, recvfrom_ex,
     }
 
     SHIM_TRACE(2,
-               "recvfrom_ex fd=%d/lwfd=%d len=%d rc=%d errno=%d",
-               sockfd, stack_fd(sockfd), len, r, errno);
+               "recvfrom_ex fd=%d/lwfd=%d len=%d flags=0x%x extra_len=%d rc=%d errno=%d",
+               sockfd, stack_fd(sockfd), len, flags, extra_len, r, errno);
 
     return r;
 }
@@ -1203,6 +1232,26 @@ int nsysnet_shim_install(void)
     SHIM_PATCH(getsockname);
     SHIM_PATCH(getpeername);
     SHIM_PATCH(socketlasterr);
+
+    /*
+     * Minecraft/NEX asks nn_ac for the local interface address.
+     * Keep it consistent with the AX-routed sockets.
+     */
+    {
+        function_replacement_data_t d = REPLACE_FUNCTION_EX(
+            ac_get_assigned_address,
+            LIBRARY_NN_AC,
+            "GetAssignedAddress__Q2_2nn2acFPUl",
+            0,
+            0,
+            FP_TARGET_PROCESS_GAME);
+
+        if (add_patch(&d,
+                      "nn_ac::GetAssignedAddress",
+                      FP_TARGET_PROCESS_GAME) < 0)
+            goto fail;
+    }
+
     if (!atomic_load(&system_dns)) {
         SHIM_PATCH(gethostbyname);
         SHIM_PATCH(getaddrinfo);
