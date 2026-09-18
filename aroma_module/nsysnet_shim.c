@@ -135,6 +135,27 @@ static atomic_int nssl_last_fd;
 static atomic_int nssl_last_mapped;
 static atomic_int nssl_last_result;
 
+/*
+ * Deferred NSSL I/O probe. Never log from the title thread.
+ * Keep the first few operations plus later errors.
+ */
+#define NSSL_IO_SLOTS 16
+#define NSSL_IO_READ  1
+#define NSSL_IO_WRITE 2
+
+struct nssl_io_event {
+    atomic_int ready;
+    int op;
+    int connection;
+    int result;
+    int bytes;
+};
+
+static struct nssl_io_event nssl_io_events[NSSL_IO_SLOTS];
+static atomic_uint nssl_io_write;
+static atomic_uint nssl_io_calls;
+static unsigned nssl_io_read;
+
 void nsysnet_shim_set_trace_level(int level)
 {
     atomic_store(&shim_trace_level, level);
@@ -893,6 +914,60 @@ DECL_FUNCTION(int, socketlasterr, void)
  *
  * Absolutely no logging is performed here.
  */
+static void nssl_io_queue(int op, int connection, int result, int bytes)
+{
+    unsigned call = atomic_fetch_add(&nssl_io_calls, 1);
+
+    /*
+     * Record the first four operations so we can see the normal sequence,
+     * then only failures. This keeps logging tiny during normal traffic.
+     */
+    if (call >= 4 && result >= 0)
+        return;
+
+    unsigned slot = atomic_fetch_add(&nssl_io_write, 1);
+
+    if (slot >= NSSL_IO_SLOTS)
+        return;
+
+    struct nssl_io_event *e = &nssl_io_events[slot];
+
+    e->op = op;
+    e->connection = connection;
+    e->result = result;
+    e->bytes = bytes;
+
+    atomic_store_explicit(&e->ready, 1, memory_order_release);
+}
+
+int nsysnet_shim_take_nssl_io(int *op,
+                              int *connection,
+                              int *result,
+                              int *bytes)
+{
+    if (nssl_io_read >= NSSL_IO_SLOTS)
+        return 0;
+
+    struct nssl_io_event *e = &nssl_io_events[nssl_io_read];
+
+    if (!atomic_load_explicit(&e->ready, memory_order_acquire))
+        return 0;
+
+    if (op)
+        *op = e->op;
+    if (connection)
+        *connection = e->connection;
+    if (result)
+        *result = e->result;
+    if (bytes)
+        *bytes = e->bytes;
+
+    atomic_store(&e->ready, 0);
+    nssl_io_read++;
+
+    return 1;
+}
+
 DECL_FUNCTION(int32_t, NSSLCreateConnection,
               int32_t context,
               const char *host,
@@ -921,6 +996,48 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
          */
         atomic_store(&nssl_activity_pending, 1);
     }
+
+    return result;
+}
+
+DECL_FUNCTION(int32_t, NSSLRead,
+              int32_t connection,
+              void *buffer,
+              int32_t length,
+              int32_t *outBytesRead)
+{
+    int32_t result = real_NSSLRead(connection,
+                                   buffer,
+                                   length,
+                                   outBytesRead);
+
+    int bytes = outBytesRead ? *outBytesRead : -1;
+
+    nssl_io_queue(NSSL_IO_READ,
+                  connection,
+                  result,
+                  bytes);
+
+    return result;
+}
+
+DECL_FUNCTION(int32_t, NSSLWrite,
+              int32_t connection,
+              const void *buffer,
+              int32_t length,
+              int32_t *outBytesWritten)
+{
+    int32_t result = real_NSSLWrite(connection,
+                                    buffer,
+                                    length,
+                                    outBytesWritten);
+
+    int bytes = outBytesWritten ? *outBytesWritten : -1;
+
+    nssl_io_queue(NSSL_IO_WRITE,
+                  connection,
+                  result,
+                  bytes);
 
     return result;
 }
@@ -1205,6 +1322,8 @@ int nsysnet_shim_install(void)
      * observational only and always calls the original implementation.
      */
     SHIM_PATCH(NSSLCreateConnection);
+    SHIM_PATCH(NSSLRead);
+    SHIM_PATCH(NSSLWrite);
 
     if (!atomic_load(&system_dns)) {
         SHIM_PATCH(gethostbyname);
@@ -1242,6 +1361,13 @@ void nsysnet_shim_begin_title(void) {
     atomic_store(&nssl_last_fd, -1);
     atomic_store(&nssl_last_mapped, 0);
     atomic_store(&nssl_last_result, 0);
+
+    atomic_store(&nssl_io_write, 0);
+    atomic_store(&nssl_io_calls, 0);
+    nssl_io_read = 0;
+
+    for (int i = 0; i < NSSL_IO_SLOTS; i++)
+        atomic_store(&nssl_io_events[i].ready, 0);
 
     for (int i=0; i<AI_OWNED_MAX; ++i) atomic_store(&ai_owned[i], NULL);
 }

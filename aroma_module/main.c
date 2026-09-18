@@ -321,6 +321,28 @@ static int run_network(int argc, const char **argv)
             }
         }
 
+        /*
+         * Deferred NSSL I/O diagnostics. Only the first few calls and
+         * failures are retained by the hook.
+         */
+        {
+            int op;
+            int connection;
+            int result;
+            int bytes;
+
+            while (nsysnet_shim_take_nssl_io(&op,
+                                              &connection,
+                                              &result,
+                                              &bytes)) {
+                AX_LOG("NSSL %s conn=%d rc=%d bytes=%d",
+                       op == 1 ? "READ" : "WRITE",
+                       connection,
+                       result,
+                       bytes);
+            }
+        }
+
         /* Log IP changes and status */
         if (ip && strcmp(ip, previous_ip)) {
             strncpy(previous_ip, ip, sizeof(previous_ip) - 1);
