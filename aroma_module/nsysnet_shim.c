@@ -927,11 +927,11 @@ static void nssl_io_queue(int op, int connection, int result, int bytes)
     unsigned call = atomic_fetch_add(&nssl_io_calls, 1);
 
     /*
-     * Record the first four operations so we can see the normal sequence,
-     * then only failures. This keeps logging tiny during normal traffic.
+     * Record the first NSSL_IO_SLOTS operations. We need the complete
+     * post-handshake sequence to see whether HTTPS replies actually reach
+     * the title.
      */
-    if (call >= 4 && result >= 0)
-        return;
+    (void)call;
 
     unsigned slot = atomic_fetch_add(&nssl_io_write, 1);
 
