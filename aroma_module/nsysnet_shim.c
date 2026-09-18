@@ -162,7 +162,7 @@ static uint32_t nettrace_be32(const void *ptr)
     return lwip_ntohl(v);
 }
 
-static void nettrace_queue16(int kind,
+static void nettrace_queue(int kind,
                              int fd,
                              int lwfd,
                              uint32_t ip,
@@ -172,7 +172,7 @@ static void nettrace_queue16(int kind,
                              int rc,
                              int err)
 {
-    if (atomic_load(&shim_trace_level) < 2 || !buf || len != 16)
+    if (atomic_load(&shim_trace_level) < 2 || !buf || len <= 0)
         return;
 
     unsigned n = atomic_fetch_add_explicit(&nettrace_next, 1,
@@ -194,8 +194,12 @@ static void nettrace_queue16(int kind,
     e->rc = rc;
     e->err = err;
 
-    for (int i = 0; i < 4; i++)
-        e->word[i] = nettrace_be32((const uint8_t *)buf + i * 4);
+    for (int i = 0; i < 4; i++) {
+        if (len >= (i + 1) * 4)
+            e->word[i] = nettrace_be32((const uint8_t *)buf + i * 4);
+        else
+            e->word[i] = 0;
+    }
 
     atomic_store_explicit(&e->state, 2, memory_order_release);
 }
@@ -217,8 +221,8 @@ void nsysnet_shim_trace_drain(void)
         uint32_t ip = e->ip;
 
         WHBLogPrintf(
-            "AX88179 NNCS: %s fd=%d/lwfd=%d %s %u.%u.%u.%u:%u "
-            "type=%u word1=%u word2=%08x word3=%08x rc=%d errno=%d",
+            "AX88179 NEX: %s fd=%d/lwfd=%d %s %u.%u.%u.%u:%u "
+            "bytes=%u first=%08x %08x %08x %08x rc=%d errno=%d",
             e->kind == NETTRACE_TX ? "TX" : "RX",
             e->fd, e->lwfd,
             e->kind == NETTRACE_TX ? "->" : "<-",
@@ -227,6 +231,7 @@ void nsysnet_shim_trace_drain(void)
             (ip >> 8) & 255,
             ip & 255,
             e->port,
+            (unsigned)e->len,
             e->word[0],
             e->word[1],
             e->word[2],
@@ -240,6 +245,32 @@ void nsysnet_shim_trace_drain(void)
 
 static int shim_accepts(void) { return atomic_load(&accepting_sockets); }
 static int stack_fd(int fd) { return atomic_load(&mapped_fd[fd]); }
+
+static int stack_local_port(int lwfd)
+{
+    struct sockaddr_in a;
+    socklen_t alen = sizeof(a);
+
+    if (lwip_getsockname(lwfd, (struct sockaddr *)&a, &alen) < 0)
+        return -1;
+
+    return nsn_ntohs(a.sin_port);
+}
+
+static void stack_peer(int lwfd, uint32_t *ip, uint16_t *port)
+{
+    struct sockaddr_in a;
+    socklen_t alen = sizeof(a);
+
+    *ip = 0;
+    *port = 0;
+
+    if (lwip_getpeername(lwfd, (struct sockaddr *)&a, &alen) == 0) {
+        *ip = lwip_ntohl(a.sin_addr.s_addr);
+        *port = nsn_ntohs(a.sin_port);
+    }
+}
+
 static void track_fd(int fd, int lwfd) {
     atomic_store(&mapped_fd[fd], lwfd);
     atomic_fetch_or(&open_mask, 1u << fd);
@@ -487,9 +518,30 @@ DECL_FUNCTION(int, shutdown, int sockfd, int how)
 
 DECL_FUNCTION(int, send, int sockfd, const void *buf, size_t len, int flags)
 {
-    if (is_foreign(sockfd)) { errno = -1; return real_send(sockfd, buf, len, flags); }
+    if (is_foreign(sockfd)) {
+        errno = -1;
+        return real_send(sockfd, buf, len, flags);
+    }
+
     errno = 0;
-    return (int)lwip_send(stack_fd(sockfd), buf, len, msg_flags_to_lwip(flags));
+
+    int lwfd = stack_fd(sockfd);
+    int r = (int)lwip_send(lwfd, buf, len, msg_flags_to_lwip(flags));
+
+    if (stack_local_port(lwfd) == 59941) {
+        uint32_t ip;
+        uint16_t port;
+
+        stack_peer(lwfd, &ip, &port);
+
+        nettrace_queue(NETTRACE_TX,
+                       sockfd, lwfd,
+                       ip, port,
+                       buf, (int)len,
+                       r, errno);
+    }
+
+    return r;
 }
 
 DECL_FUNCTION(int, sendto, int sockfd, const void *buf, size_t len, int flags,
@@ -499,23 +551,42 @@ DECL_FUNCTION(int, sendto, int sockfd, const void *buf, size_t len, int flags,
         errno = -1;
         return real_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
     }
-    errno = 0;
-    struct sockaddr_in l;
-    if (!dest_addr)
-        return (int)lwip_sendto(stack_fd(sockfd), buf, len, msg_flags_to_lwip(flags), NULL, 0);
-    if (!sockaddr_to_lwip(&l, dest_addr, addrlen)) { errno = EAFNOSUPPORT; return -1; }
 
-    int r = (int)lwip_sendto(stack_fd(sockfd), buf, len,
+    errno = 0;
+
+    int lwfd = stack_fd(sockfd);
+    uint32_t trace_ip = 0;
+    uint16_t trace_port = 0;
+    int r;
+
+    if (!dest_addr) {
+        r = (int)lwip_sendto(lwfd, buf, len,
+                             msg_flags_to_lwip(flags),
+                             NULL, 0);
+
+        stack_peer(lwfd, &trace_ip, &trace_port);
+    } else {
+        struct sockaddr_in l;
+
+        if (!sockaddr_to_lwip(&l, dest_addr, addrlen)) {
+            errno = EAFNOSUPPORT;
+            return -1;
+        }
+
+        r = (int)lwip_sendto(lwfd, buf, len,
                              msg_flags_to_lwip(flags),
                              (struct sockaddr *)&l, sizeof(l));
 
-    if (len == 16) {
-        nettrace_queue16(NETTRACE_TX,
-                         sockfd,
-                         stack_fd(sockfd),
-                         lwip_ntohl(l.sin_addr.s_addr),
-                         nsn_ntohs(l.sin_port),
-                         buf, (int)len, r, errno);
+        trace_ip = lwip_ntohl(l.sin_addr.s_addr);
+        trace_port = nsn_ntohs(l.sin_port);
+    }
+
+    if (stack_local_port(lwfd) == 59941) {
+        nettrace_queue(NETTRACE_TX,
+                       sockfd, lwfd,
+                       trace_ip, trace_port,
+                       buf, (int)len,
+                       r, errno);
     }
 
     return r;
@@ -548,12 +619,23 @@ DECL_FUNCTION(int, sendto_multi,
             return -1;
         }
 
-        int r = (int)lwip_sendto(stack_fd(sockfd),
+        int lwfd = stack_fd(sockfd);
+
+        int r = (int)lwip_sendto(lwfd,
                                  buf,
                                  len,
                                  msg_flags_to_lwip(flags),
                                  (struct sockaddr *)&l,
                                  sizeof(l));
+
+        if (stack_local_port(lwfd) == 59941) {
+            nettrace_queue(NETTRACE_TX,
+                           sockfd, lwfd,
+                           lwip_ntohl(l.sin_addr.s_addr),
+                           nsn_ntohs(l.sin_port),
+                           buf, len,
+                           r, errno);
+        }
 
         SHIM_TRACE(2,
                    "sendto_multi fd=%d/lwfd=%d dst=%d/%d len=%d rc=%d errno=%d",
@@ -641,7 +723,7 @@ DECL_FUNCTION(int, recvfrom_ex,
 
     if (r >= 0 && src_addr) {
         if (r == 16) {
-            nettrace_queue16(NETTRACE_RX,
+            nettrace_queue(NETTRACE_RX,
                              sockfd,
                              stack_fd(sockfd),
                              lwip_ntohl(l.sin_addr.s_addr),
