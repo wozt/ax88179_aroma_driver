@@ -1,5 +1,34 @@
 # AX88179 Wii U Aroma - Current Findings
 
+
+[✓] IPv4 / ARP
+[✓] DHCP
+[✓] ICMP
+[✓] TCP client
+[✓] UDP
+[✓] select
+[✓] nonblocking
+[✓] errno / SO_ERROR
+[✓] socket-option translation principale
+[✓] multicast TTL / LOOP
+
+[ ] SNDBUF / RCVBUF ABI exacte
+[ ] IP_MULTICAST_IF
+[ ] IP_ADD_MEMBERSHIP / DROP_MEMBERSHIP
+[ ] réception multicast réelle
+[ ] TCP listen / accept fonctionnel réel
+[ ] sendto_multi_ex
+[ ] recvfrom_multi
+[ ] recvfrom_ex TTL réel au lieu du placeholder 64
+[ ] gethostbyaddr
+[ ] getaddrinfo_async / _rs
+[ ] NSSL : état/options conservés pendant promotion
+[ ] hot-unplug / reconnect
+[ ] perte/restauration du link
+[ ] renouvellement / perte DHCP
+[ ] exhaustion sockets / buffers
+[ ] tests charge et concurrence
+
 ## Mario Maker / Pretendo validation — NSSL bridge and SO_TCPSACK (2026-09-18)
 
 Mario Maker was used as a real-title compatibility test with:
