@@ -1586,3 +1586,65 @@ cache lwIP ou comme une annulation générale des requêtes en vol.
 
 Le dernier comportement plausible à mesurer est le cache négatif :
 clear_resolver_cache pourrait invalider des échecs DNS/NXDOMAIN.
+
+
+## clear_resolver_cache : aucun effet DNS visible dans les cas mesurés
+
+Trois comportements natifs ont été caractérisés.
+
+### Résultat positif déjà résolu
+
+Après :
+
+    getaddrinfo_async(host) -> rc=0
+
+un appel à :
+
+    clear_resolver_cache()
+
+laisse le même hostname immédiatement disponible :
+
+    getaddrinfo_async(host) -> rc=0
+
+### Résolution encore en cours
+
+Une résolution a été démarrée :
+
+    getaddrinfo_async("www.netbsd.org")
+        -> EAI_INPROGRESS
+
+clear_resolver_cache() a été appelé immédiatement.
+
+Après 750 ms sans aucun nouveau polling :
+
+    getaddrinfo_async("www.netbsd.org")
+        -> rc=0
+
+La requête en vol n'a donc pas été annulée.
+
+### Échec DNS / NXDOMAIN
+
+Pour :
+
+    ax88179-negative-cache-probe.invalid
+
+comportement observé :
+
+    premier cycle : 15 -> 8
+    deuxième cycle : 15 -> 8
+
+Après clear_resolver_cache :
+
+    nouveau cycle : 15 -> 8
+
+L'échec n'est donc pas servi comme une erreur négative immédiatement
+mise en cache dans cette API.
+
+Conclusion pratique pour le shim AX :
+
+    [✓] ne PAS vider la table DNS lwIP
+    [✓] ne PAS annuler les requêtes lwIP pending
+    [✓] conserver clear_resolver_cache en passthrough natif
+
+Un flush lwIP complet serait plus agressif que le comportement natif
+mesuré.
