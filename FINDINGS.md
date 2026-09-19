@@ -37,7 +37,7 @@
 [✓] exhaustion sockets
 [✓] exhaustion buffers (capacité native atteinte à débit soutenable)
 [ ] RX burst haute cadence (~147 Mbit/s)
-[ ] charge/concurrence
+[✓] charge/concurrence
 
 ## État actuel
 
@@ -920,3 +920,63 @@ Reste à caractériser séparément :
 
     [ ] renew/rebind lors d'une véritable expiration ou modification
         de lease DHCP
+
+
+## Charge / concurrence validée
+
+Un stress test prolongé a été effectué simultanément avec :
+
+    4 sockets TCP AX
+    4 sockets UDP AX
+    1 socket UDP native de coexistence
+
+Chaque worker AX a exécuté :
+
+    8192 rounds
+
+avec alternance de payloads :
+
+    32
+    504
+    1024
+    1400 octets
+
+Résultat total :
+
+    65536 échanges AX
+    48496640 octets de payload vérifié
+
+Tous les workers ont terminé sans erreur :
+
+    TCP worker 0 : 8192/8192 errno=0
+    TCP worker 1 : 8192/8192 errno=0
+    TCP worker 2 : 8192/8192 errno=0
+    TCP worker 3 : 8192/8192 errno=0
+
+    UDP worker 4 : 8192/8192 errno=0
+    UDP worker 5 : 8192/8192 errno=0
+    UDP worker 6 : 8192/8192 errno=0
+    UDP worker 7 : 8192/8192 errno=0
+
+Résultat global :
+
+    AXSTRESS result=PASS
+    AXCONCURRENT result=PASS
+
+Aucune corruption de payload, erreur socket, collision de fd ou timeout
+n'a été observé.
+
+La socket native créée avant activation du shim est restée correctement
+routée sur :
+
+    192.168.2.124
+
+pendant que les sockets AX utilisaient :
+
+    192.168.2.190
+
+La coexistence native + AX reste donc correcte sous charge prolongée.
+
+Conclusion :
+
+    charge / concurrence : VALIDÉ
