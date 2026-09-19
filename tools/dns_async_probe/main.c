@@ -1229,6 +1229,280 @@ static void run_clear_pending_probe(void)
         "=== END NATIVE CLEAR PENDING DNS TEST ===");
 }
 
+
+static int poll_native_async_failure(
+    raw_getaddrinfo_fn fn,
+    raw_freeaddrinfo_fn native_free,
+    const char *host,
+    int *attempts_out,
+    uint64_t *elapsed_out)
+{
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    struct nsn_addrinfo *res = NULL;
+
+    OSTime begin = OSGetTime();
+    OSTime deadline =
+        begin + OSMillisecondsToTicks(5000);
+
+    int attempts = 0;
+    int rc = NSN_EAI_INPROGRESS;
+
+    while (OSGetTime() < deadline) {
+        res = NULL;
+
+        rc =
+            fn(host,
+               "80",
+               &hints,
+               &res);
+
+        attempts++;
+
+        if (rc != NSN_EAI_INPROGRESS)
+            break;
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+    }
+
+    if (elapsed_out) {
+        *elapsed_out =
+            OSTicksToMilliseconds(
+                OSGetTime() - begin);
+    }
+
+    if (attempts_out)
+        *attempts_out = attempts;
+
+    if (rc == 0 && res && native_free) {
+        native_free(res);
+    }
+
+    return rc;
+}
+
+static void run_clear_negative_probe(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== NATIVE NEGATIVE DNS CACHE TEST ===");
+
+    raw_getaddrinfo_fn async_fn =
+        (raw_getaddrinfo_fn)find_export_addr(
+            "getaddrinfo_async");
+
+    raw_freeaddrinfo_fn native_free =
+        (raw_freeaddrinfo_fn)find_export_addr(
+            "freeaddrinfo");
+
+    raw_clear_resolver_cache_fn clear_fn =
+        (raw_clear_resolver_cache_fn)find_export_addr(
+            "clear_resolver_cache");
+
+    if (!async_fn ||
+        !native_free ||
+        !clear_fn) {
+
+        probe_say(
+            "NEG-CACHE missing native export");
+        return;
+    }
+
+    const char *host =
+        "ax88179-negative-cache-probe.invalid";
+
+    /*
+     * First resolution: should normally begin asynchronously and end
+     * with an EAI_* failure.
+     */
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    struct nsn_addrinfo *res = NULL;
+
+    OSTime begin = OSGetTime();
+
+    int initial1 =
+        async_fn(
+            host,
+            "80",
+            &hints,
+            &res);
+
+    if (res) {
+        native_free(res);
+        res = NULL;
+    }
+
+    int final1 = initial1;
+    int attempts1 = 1;
+
+    OSTime deadline =
+        OSGetTime() +
+        OSMillisecondsToTicks(5000);
+
+    while (final1 == NSN_EAI_INPROGRESS &&
+           OSGetTime() < deadline) {
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+
+        res = NULL;
+
+        final1 =
+            async_fn(
+                host,
+                "80",
+                &hints,
+                &res);
+
+        attempts1++;
+
+        if (res) {
+            native_free(res);
+            res = NULL;
+        }
+    }
+
+    uint64_t elapsed1 =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    probe_say(
+        "NEG-CACHE first initial=%d final=%d attempts=%d elapsed=%llu ms",
+        initial1,
+        final1,
+        attempts1,
+        (unsigned long long)elapsed1);
+
+    /*
+     * Second call immediately after the failure.
+     *
+     * If the failure itself is cached, this should return the final
+     * error immediately instead of EAI_INPROGRESS.
+     */
+    begin = OSGetTime();
+
+    res = NULL;
+
+    int second_initial =
+        async_fn(
+            host,
+            "80",
+            &hints,
+            &res);
+
+    uint64_t second_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    probe_say(
+        "NEG-CACHE second initial=%d ms=%llu res=%08x",
+        second_initial,
+        (unsigned long long)second_ms,
+        (unsigned)(uintptr_t)res);
+
+    if (res) {
+        native_free(res);
+        res = NULL;
+    }
+
+    /*
+     * If that second call started another request, allow it to finish
+     * before testing clear_resolver_cache so no request is left pending.
+     */
+    if (second_initial == NSN_EAI_INPROGRESS) {
+        int dummy_attempts = 0;
+        uint64_t dummy_elapsed = 0;
+
+        int second_final =
+            poll_native_async_failure(
+                async_fn,
+                native_free,
+                host,
+                &dummy_attempts,
+                &dummy_elapsed);
+
+        probe_say(
+            "NEG-CACHE second completion final=%d extra_attempts=%d elapsed=%llu ms",
+            second_final,
+            dummy_attempts,
+            (unsigned long long)dummy_elapsed);
+    }
+
+    clear_fn();
+
+    probe_say(
+        "NEG-CACHE clear_resolver_cache returned");
+
+    /*
+     * Critical observation:
+     *
+     * cached-negative before clear + EAI_INPROGRESS after clear
+     * would demonstrate that ioctl 0x32 clears negative resolver state.
+     */
+    begin = OSGetTime();
+
+    res = NULL;
+
+    int after_clear =
+        async_fn(
+            host,
+            "80",
+            &hints,
+            &res);
+
+    uint64_t after_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    probe_say(
+        "NEG-CACHE after clear initial=%d ms=%llu res=%08x",
+        after_clear,
+        (unsigned long long)after_ms,
+        (unsigned)(uintptr_t)res);
+
+    if (res) {
+        native_free(res);
+        res = NULL;
+    }
+
+    /*
+     * Clean up an async request started by the final observation.
+     */
+    if (after_clear == NSN_EAI_INPROGRESS) {
+        int attempts = 0;
+        uint64_t elapsed = 0;
+
+        int final =
+            poll_native_async_failure(
+                async_fn,
+                native_free,
+                host,
+                &attempts,
+                &elapsed);
+
+        probe_say(
+            "NEG-CACHE after-clear completion final=%d attempts=%d elapsed=%llu ms",
+            final,
+            attempts,
+            (unsigned long long)elapsed);
+    }
+
+    probe_say(
+        "=== END NATIVE NEGATIVE DNS CACHE TEST ===");
+}
+
 static void run_shim_dns_probe(void)
 {
     probe_say("%s", "");
@@ -1448,6 +1722,8 @@ int main(void)
     run_clear_resolver_cache_probe();
 
     run_clear_pending_probe();
+
+    run_clear_negative_probe();
 
     run_shim_dns_probe();
 
