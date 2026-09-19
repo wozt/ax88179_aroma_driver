@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <wut_rplwrap.h>
 
 #include "probe.h"
 
@@ -257,6 +258,27 @@ struct nsn_addrinfo {
     struct nsn_sockaddr *ai_addr;
     struct nsn_addrinfo *ai_next;
 };
+
+extern int RPLWRAP(getaddrinfo_async)(
+    const char *node,
+    const char *service,
+    const struct nsn_addrinfo *hints,
+    struct nsn_addrinfo **res);
+
+extern int RPLWRAP(getaddrinfo_async_rs)(
+    const char *node,
+    const char *service,
+    const struct nsn_addrinfo *hints,
+    struct nsn_addrinfo **res);
+
+extern int RPLWRAP(getaddrinfo_rs)(
+    const char *node,
+    const char *service,
+    const struct nsn_addrinfo *hints,
+    struct nsn_addrinfo **res);
+
+extern void RPLWRAP(freeaddrinfo)(
+    struct nsn_addrinfo *res);
 
 typedef int (*raw_getaddrinfo_fn)(
     const char *node,
@@ -709,6 +731,153 @@ static void run_async_poll_probe(void)
         "=== END ASYNC GETADDRINFO POLLING TEST ===");
 }
 
+
+typedef int (*shim_gai_fn)(
+    const char *,
+    const char *,
+    const struct nsn_addrinfo *,
+    struct nsn_addrinfo **);
+
+static void run_one_shim_poll(
+    const char *label,
+    shim_gai_fn fn,
+    const char *node)
+{
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    struct nsn_addrinfo *res = NULL;
+
+    OSTime begin = OSGetTime();
+    OSTime deadline =
+        begin + OSMillisecondsToTicks(5000);
+
+    int attempts = 0;
+    int initial = 0x7fffffff;
+    int rc = NSN_EAI_INPROGRESS;
+
+    while (OSGetTime() < deadline) {
+        res = NULL;
+
+        rc =
+            fn(node,
+               "80",
+               &hints,
+               &res);
+
+        attempts++;
+
+        if (attempts == 1)
+            initial = rc;
+
+        if (rc != NSN_EAI_INPROGRESS)
+            break;
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+    }
+
+    uint64_t elapsed =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    probe_say(
+        "SHIM-GAI %-14s node=%s",
+        label,
+        node);
+
+    probe_say(
+        "  initial=%d final=%d attempts=%d elapsed=%llu ms res=%08x",
+        initial,
+        rc,
+        attempts,
+        (unsigned long long)elapsed,
+        (unsigned)(uintptr_t)res);
+
+    if (rc == 0 && res) {
+        struct nsn_addrinfo *first = res;
+
+        char ip[32] = "?";
+        unsigned port = 0;
+
+        if (first->ai_addr &&
+            first->ai_addrlen >=
+                sizeof(struct nsn_sockaddr_in) &&
+            first->ai_addr->sa_family == 2) {
+
+            struct nsn_sockaddr_in *sin =
+                (struct nsn_sockaddr_in *)
+                    first->ai_addr;
+
+            struct in_addr a = {
+                .s_addr = sin->sin_addr
+            };
+
+            inet_ntop(
+                AF_INET,
+                &a,
+                ip,
+                sizeof(ip));
+
+            port = ntohs(
+                sin->sin_port);
+        }
+
+        probe_say(
+            "  first=%s:%u fam=%d type=%d proto=%d",
+            ip,
+            port,
+            first->ai_family,
+            first->ai_socktype,
+            first->ai_protocol);
+
+        RPLWRAP(freeaddrinfo)(res);
+    }
+}
+
+static void run_shim_dns_probe(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== AX SHIM ASYNC DNS TEST ===");
+
+    /*
+     * Numeric address must complete immediately.
+     */
+    run_one_shim_poll(
+        "async-num",
+        RPLWRAP(getaddrinfo_async),
+        "127.0.0.1");
+
+    /*
+     * Fresh hostnames exercise actual lwIP/AX DNS.
+     */
+    run_one_shim_poll(
+        "async",
+        RPLWRAP(getaddrinfo_async),
+        "www.gnu.org");
+
+    run_one_shim_poll(
+        "async-rs",
+        RPLWRAP(getaddrinfo_async_rs),
+        "www.archlinux.org");
+
+    /*
+     * Sync _rs must behave exactly like normal getaddrinfo.
+     */
+    run_one_shim_poll(
+        "sync-rs",
+        RPLWRAP(getaddrinfo_rs),
+        "www.freebsd.org");
+
+    probe_say(
+        "=== END AX SHIM ASYNC DNS TEST ===");
+}
+
 static void run_behavior_probe(void)
 {
     memset(
@@ -885,6 +1054,8 @@ int main(void)
     run_behavior_probe();
 
     run_async_poll_probe();
+
+    run_shim_dns_probe();
 
 wait:
     probe_say("HOME -> Quitter");
