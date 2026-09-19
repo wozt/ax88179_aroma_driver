@@ -109,13 +109,20 @@ static unsigned drain_socket(
     *bytes = 0;
 
     for (;;) {
+        struct sockaddr_in from;
+        socklen_t from_len = sizeof(from);
+
+        memset(&from, 0, sizeof(from));
+
         errno = 0;
 
-        int n = recv(
+        int n = recvfrom(
             fd,
             buf,
             sizeof(buf),
-            0);
+            0,
+            (struct sockaddr *)&from,
+            &from_len);
 
         if (n > 0) {
             packets++;
