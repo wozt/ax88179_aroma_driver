@@ -2256,3 +2256,82 @@ sockets.c already included lwip/tcp.h but not tcp_priv.h.
 
 The implementation itself was not changed. The missing internal header
 was added and the module was rebuilt.
+
+
+## AX TCP receive window after first per-PCB RCVBUF fix
+
+The receive-pressure probe was repeated after adding per-PCB rcv_wnd_max.
+
+Confirmed AX path:
+
+    SO_MYADDR=192.168.2.190
+
+Results:
+
+    default RCVBUF=8192:
+        t=250ms   RXDATA=7300
+        t=750ms   RXDATA=8192
+        t=1500ms  RXDATA=8192
+        drain=262144/262144
+        EOF=1
+
+    RCVBUF=1:
+        RXDATA=1
+        drain=1
+        EOF=0
+
+    RCVBUF=4096:
+        RXDATA=0 during the initial 1500ms observation
+        drain=221636/262144
+        EOF=0
+
+    RCVBUF=8192:
+        RXDATA=8192
+        drain=262144/262144
+
+    RCVBUF=16384:
+        RXDATA=16384
+        drain=262144/262144
+
+    RCVBUF=65535:
+        RXDATA=23360
+        drain=262144/262144
+
+The per-PCB receive-window implementation is therefore effective:
+8192 and 16384 now reproduce native saturation, and RCVBUF=1 is
+actually constrained to one byte.
+
+Two remaining lwIP limits were identified.
+
+First, TCP_WND is currently:
+
+    16 * TCP_MSS
+    16 * 1460
+    23360 bytes
+
+Second, DEFAULT_TCP_RECVMBOX_SIZE is also 16. Roughly sixteen full TCP
+segments therefore fit in the TCP netconn receive mailbox.
+
+Both independently explain why a requested 65535-byte Wii U receive
+buffer cannot currently accumulate more than approximately 23360 bytes.
+
+Small receive windows expose another issue. lwIP's receive-window update
+thresholds are still based on the global TCP_WND rather than the new
+per-PCB rcv_wnd_max. Consequently a title may consume a small receive
+window without causing an appropriate window-update ACK.
+
+This is particularly visible with:
+
+    RCVBUF=1    -> one byte then no useful progress
+    RCVBUF=4096 -> incomplete progress
+
+Native nsysnet instead continues reopening these small windows, with the
+one-byte case progressing extremely slowly.
+
+Next fix:
+
+- raise the global maximum TCP receive window to 65535;
+- enlarge the TCP receive mailbox and pbuf pool;
+- make receive-window update thresholds depend on rcv_wnd_max;
+- use delayed window-update ACK behaviour for the characterized
+  RCVBUF=1 case.
