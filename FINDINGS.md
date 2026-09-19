@@ -2383,3 +2383,46 @@ important semantics now match:
 
 RCVBUF / SO_RXDATA real TCP behaviour is therefore considered
 functionally validated.
+
+
+## Native UDP buffer exhaustion probe - invalid drain attempt
+
+The first global UDP receive-buffer exhaustion run used the native
+nsysnet path:
+
+    SO_MYADDR=192.168.2.124
+
+Eight UDP sockets were bound with:
+
+    SO_RCVBUF=65535
+
+After the first 512-datagram burst, each socket reported approximately:
+
+    SO_RXDATA=65136
+
+so more than 500 KiB of UDP receive data was simultaneously queued
+across the eight native sockets.
+
+However the probe then failed to drain every socket:
+
+    recv(..., MSG_DONTWAIT) -> errno=122
+
+The sockets had already been configured O_NONBLOCK, making MSG_DONTWAIT
+unnecessary.
+
+Because no queued datagrams were consumed, this run cannot characterize
+native global buffer exhaustion or recovery.
+
+The later RXDATA increases:
+
+    65136
+    65274
+    65412
+
+were observed while the original queues remained populated and therefore
+must not be interpreted as independent exhaustion rounds.
+
+This run is recorded as an inconclusive probe-harness result, not as a
+native networking failure.
+
+The next run will use recv(..., 0) on the already nonblocking sockets.
