@@ -2624,10 +2624,34 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
 /* ------------------------------------------------------------------ */
 /* DNS                                                                 */
 
+/*
+ * Pretendo/Inkay rewrites these Nintendo NNCS hostnames before handing
+ * them to nsysnet. When our DNS hook runs before Inkay in the Function
+ * Patcher chain, that rewrite would otherwise be bypassed.
+ *
+ * Mirror Inkay's current DNS rewrite table here so dns=ax remains
+ * compatible regardless of patch ordering.
+ */
+static const char *dns_rewrite_name(const char *name)
+{
+    if (!name)
+        return NULL;
+
+    if (strcmp(name, "nncs1.app.nintendowifi.net") == 0)
+        return "nncs1.app.pretendo.cc";
+
+    if (strcmp(name, "nncs2.app.nintendowifi.net") == 0)
+        return "nncs2.app.pretendo.cc";
+
+    return name;
+}
+
 DECL_FUNCTION(struct hostent *, gethostbyname, const char *name)
 {
     if (!shim_accepts() || !ax_net_stack_ready()) return real_gethostbyname(name);
-    struct hostent *h = lwip_gethostbyname(name);
+
+    const char *resolved_name = dns_rewrite_name(name);
+    struct hostent *h = lwip_gethostbyname(resolved_name);
     if (!h) {
         switch (h_errno) { /* lwIP -> nsysnet h_errno values */
         case 210: h_errno = NSN_HOST_NOT_FOUND; break;
@@ -2705,8 +2729,10 @@ DECL_FUNCTION(int, getaddrinfo, const char *node, const char *service,
         lh.ai_protocol = hints->ai_protocol;
         lph = &lh;
     }
+    const char *resolved_node = dns_rewrite_name(node);
+
     struct addrinfo *lres = NULL;
-    int err = lwip_getaddrinfo(node, service, lph, &lres);
+    int err = lwip_getaddrinfo(resolved_node, service, lph, &lres);
     if (err != 0) return eai_to_nsn(err);
 
     /* Convert the list: wut's addrinfo swaps ai_addr/ai_canonname and its
