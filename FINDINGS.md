@@ -938,3 +938,46 @@ native nsysnet exposes the selected local interface address.
 
 This is a separate observable compatibility gap and should be fixed
 without changing wildcard results for unconnected sockets.
+
+
+## Connected getsockname AX validation
+
+After the connected-local-address compatibility fix, the AX
+`recvfrom_ex` probe reported:
+
+    PATH local=192.168.2.190:19030
+
+The equivalent native test reported:
+
+    PATH local=192.168.2.124:19030
+
+Therefore an AX UDP socket bound to `INADDR_ANY` and then connected now
+exposes the selected AX interface address through `getsockname()`, like
+native nsysnet.
+
+The recvfrom_ex TTL behaviour remained correct after this change:
+
+- baseline extra buffer is zero-filled
+- msglen >= 1 returns the real received IPv4 TTL in extra[0]
+- remaining bytes inside msglen are zero
+
+Observed AX TTL matches:
+
+    200 -> c8
+     17 -> 11
+     37 -> 25
+     64 -> 40
+     91 -> 5b
+    127 -> 7f
+
+No regression was observed in the validated recvfrom_ex TTL path.
+
+One remaining discrepancy is isolated:
+
+Native observation:
+    MSG_IP_RECVTTL + msglen=0 -> rc=-1, socketlasterr=11
+
+AX observation:
+    MSG_IP_RECVTTL + msglen=0 -> datagram received successfully
+
+This zero-length metadata case requires dedicated characterization.
