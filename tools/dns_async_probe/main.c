@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <wut_rplwrap.h>
+#include <whb/log_udp.h>
 
 #include "probe.h"
 
@@ -2994,6 +2995,243 @@ static void run_socket_lib_init_probe(void)
         "=== END NATIVE SOCKET_LIB_INIT TEST ===");
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Native socket_lib_finish behaviour                                 */
+
+typedef int (*raw_socket_lib_finish_fn)(void);
+
+struct socketlib_finish_result {
+    int worker_rc;
+
+    int lasterr_before;
+
+    int finish1_r3;
+    int lasterr_after_finish1;
+
+    int finish2_r3;
+    int lasterr_after_finish2;
+
+    int restore_init_r3;
+    int lasterr_after_restore;
+
+    uint64_t finish1_ms;
+    uint64_t finish2_ms;
+    uint64_t restore_ms;
+};
+
+static struct socketlib_finish_result
+socketlib_finish_result;
+
+static OSThread socketlib_finish_thread
+    __attribute__((aligned(0x40)));
+
+static uint8_t
+socketlib_finish_stack[BEHAVIOR_STACK_SIZE]
+    __attribute__((aligned(0x40)));
+
+static int socketlib_finish_worker(
+    int argc,
+    const char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    struct socketlib_finish_result *r =
+        &socketlib_finish_result;
+
+    memset(r, 0, sizeof(*r));
+
+    raw_socket_lib_finish_fn finish_fn =
+        (raw_socket_lib_finish_fn)find_export_addr(
+            "socket_lib_finish");
+
+    raw_socket_lib_init_fn init_fn =
+        (raw_socket_lib_init_fn)find_export_addr(
+            "socket_lib_init");
+
+    raw_socketlasterr_fn lasterr_fn =
+        (raw_socketlasterr_fn)find_export_addr(
+            "socketlasterr");
+
+    if (!finish_fn ||
+        !init_fn ||
+        !lasterr_fn) {
+
+        r->worker_rc = -1;
+        return -1;
+    }
+
+    /*
+     * Absolutely no logging/UI/network activity while nsysnet may be
+     * closed.
+     */
+    r->lasterr_before =
+        lasterr_fn();
+
+    OSTime begin =
+        OSGetTime();
+
+    r->finish1_r3 =
+        finish_fn();
+
+    OSTime end =
+        OSGetTime();
+
+    r->finish1_ms =
+        OSTicksToMilliseconds(
+            end - begin);
+
+    r->lasterr_after_finish1 =
+        lasterr_fn();
+
+    /*
+     * Second finish while already uninitialised.
+     */
+    begin =
+        OSGetTime();
+
+    r->finish2_r3 =
+        finish_fn();
+
+    end =
+        OSGetTime();
+
+    r->finish2_ms =
+        OSTicksToMilliseconds(
+            end - begin);
+
+    r->lasterr_after_finish2 =
+        lasterr_fn();
+
+    /*
+     * Restore native nsysnet before returning to the main/UI thread.
+     */
+    begin =
+        OSGetTime();
+
+    r->restore_init_r3 =
+        init_fn();
+
+    end =
+        OSGetTime();
+
+    r->restore_ms =
+        OSTicksToMilliseconds(
+            end - begin);
+
+    r->lasterr_after_restore =
+        lasterr_fn();
+
+    r->worker_rc = 0;
+
+    return 0;
+}
+
+static void run_socket_lib_finish_probe(void)
+{
+    /*
+     * Do not emit a log before the test: socket_lib_finish may invalidate
+     * the current WHB UDP socket.
+     */
+
+    memset(
+        &socketlib_finish_result,
+        0,
+        sizeof(socketlib_finish_result));
+
+    BOOL created =
+        OSCreateThread(
+            &socketlib_finish_thread,
+            socketlib_finish_worker,
+            0,
+            NULL,
+            socketlib_finish_stack +
+                sizeof(socketlib_finish_stack),
+            sizeof(socketlib_finish_stack),
+            16,
+            OS_THREAD_ATTRIB_AFFINITY_ANY);
+
+    if (!created) {
+        probe_say(
+            "SOCKLIB-FINISH OSCreateThread FAIL");
+        return;
+    }
+
+    OSSetThreadName(
+        &socketlib_finish_thread,
+        "native socket lib finish");
+
+    OSResumeThread(
+        &socketlib_finish_thread);
+
+    /*
+     * Intentionally join directly instead of polling ProcUI while the
+     * native socket library is temporarily closed.
+     *
+     * The worker restores it before returning.
+     */
+    int thread_result = -1;
+
+    OSJoinThread(
+        &socketlib_finish_thread,
+        &thread_result);
+
+    /*
+     * socket_lib_finish may have invalidated WHB's existing UDP socket.
+     * Recreate the logger only after native nsysnet has been restored.
+     */
+    BOOL udp_deinit =
+        WHBLogUdpDeinit();
+
+    BOOL udp_init =
+        WHBLogUdpInit();
+
+    struct socketlib_finish_result *r =
+        &socketlib_finish_result;
+
+    probe_say("%s", "");
+    probe_say(
+        "=== NATIVE SOCKET_LIB_FINISH TEST ===");
+
+    probe_say(
+        "SOCKLIB-FINISH join=%d worker=%d udp_deinit=%d udp_init=%d",
+        thread_result,
+        r->worker_rc,
+        (int)udp_deinit,
+        (int)udp_init);
+
+    if (r->worker_rc == 0) {
+        probe_say(
+            "SOCKLIB-FINISH lasterr before=%d",
+            r->lasterr_before);
+
+        /*
+         * WUT exposes finish/init as void. r3 is diagnostic only.
+         */
+        probe_say(
+            "SOCKLIB-FINISH call1 r3=%d lasterr=%d ms=%llu",
+            r->finish1_r3,
+            r->lasterr_after_finish1,
+            (unsigned long long)r->finish1_ms);
+
+        probe_say(
+            "SOCKLIB-FINISH call2 r3=%d lasterr=%d ms=%llu",
+            r->finish2_r3,
+            r->lasterr_after_finish2,
+            (unsigned long long)r->finish2_ms);
+
+        probe_say(
+            "SOCKLIB-FINISH restore-init r3=%d lasterr=%d ms=%llu",
+            r->restore_init_r3,
+            r->lasterr_after_restore,
+            (unsigned long long)r->restore_ms);
+    }
+
+    probe_say(
+        "=== END NATIVE SOCKET_LIB_FINISH TEST ===");
+}
+
 static void run_shim_dns_abort_probe(void)
 {
     probe_say("%s", "");
@@ -3344,6 +3582,8 @@ int main(void)
     run_gethostbyaddr_probe();
 
     run_socket_lib_init_probe();
+
+    run_socket_lib_finish_probe();
 
     run_shim_gethostbyaddr_probe();
 
