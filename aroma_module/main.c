@@ -22,7 +22,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.23-hotplug-reconnect");
+WUMS_MODULE_VERSION("0.2.24-nssl-local-bridge");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -40,6 +40,7 @@ static int config_keep_first = 1;
 static int config_shim_trace = 0;
 static int config_system_dns = 0;
 static int config_force_native = 0;
+static int config_nssl_bridge = 0;
 
 static void load_config(void)
 {
@@ -82,6 +83,11 @@ static void load_config(void)
         else if (strstr(b, "route=ax"))
             config_force_native = 0;
 
+        if (strstr(b, "nssl=bridge"))
+            config_nssl_bridge = 1;
+        else if (strstr(b, "nssl=native"))
+            config_nssl_bridge = 0;
+
         int level;
         if (sscanf(b, "shim_trace=%d", &level) == 1) {
             if (level < 0) level = 0;
@@ -97,6 +103,7 @@ static void load_config(void)
     AX_LOG("CONFIG: shim trace = %d", config_shim_trace);
     AX_LOG("CONFIG: DNS = %s", config_system_dns ? "system" : "ax");
     AX_LOG("CONFIG: route = %s", config_force_native ? "native" : "ax");
+    AX_LOG("CONFIG: NSSL = %s", config_nssl_bridge ? "bridge" : "native");
 }
 
 static const char *const mark_names[] = {
@@ -280,12 +287,14 @@ static int run_network(int argc, const char **argv)
     nsysnet_shim_set_trace_level(config_shim_trace);
     nsysnet_shim_set_system_dns(config_system_dns);
     nsysnet_shim_set_force_native(config_force_native);
+    nsysnet_shim_set_nssl_bridge(config_nssl_bridge);
     ax_net_set_session_lease_mode(config_keep_first);
-    AX_LOG("config dhcp=%s trace=%d dns=%s route=%s",
+    AX_LOG("config dhcp=%s trace=%d dns=%s route=%s nssl=%s",
            config_keep_first ? "keep_first" : "always",
            config_shim_trace,
            config_system_dns ? "system" : "ax",
-           config_force_native ? "native" : "ax");
+           config_force_native ? "native" : "ax",
+           config_nssl_bridge ? "bridge" : "native");
 
     ax_net_forget();
 

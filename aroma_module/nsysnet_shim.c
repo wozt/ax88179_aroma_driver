@@ -201,6 +201,9 @@ static atomic_int shim_trace_level;
 static atomic_int system_dns;
 static atomic_int force_native;
 static atomic_int ax_activity_pending;
+static atomic_int nssl_bridge_enabled;
+
+static void nssl_relay_stop_all(void);
 
 /*
  * nsysnet exposes several socket options which lwIP either does not
@@ -286,6 +289,11 @@ void nsysnet_shim_set_system_dns(int enabled)
 void nsysnet_shim_set_force_native(int enabled)
 {
     atomic_store(&force_native, enabled ? 1 : 0);
+}
+
+void nsysnet_shim_set_nssl_bridge(int enabled)
+{
+    atomic_store(&nssl_bridge_enabled, enabled ? 1 : 0);
 }
 
 /*
@@ -1929,25 +1937,403 @@ DECL_FUNCTION(int, socketlasterr, void)
 /* NSSL bridge                                                         */
 
 /*
- * NSSL only operates on native nsysnet descriptors. AX sockets therefore
- * stay on lwIP until a title hands one to NSSLCreateConnection(), at which
- * point the public placeholder fd is connected natively to the same peer
- * and becomes a normal nsysnet socket.
+ * NSSL/IOS-NSEC needs a real nsysnet descriptor.  In legacy mode we
+ * promote the reserved public descriptor to a normal native Internet
+ * connection.
+ *
+ * Bridge mode keeps the already-connected lwIP socket alive instead:
+ *
+ *       IOS-NSEC / Nintendo NSSL
+ *                  |
+ *          native public fd
+ *                  |
+ *             127.0.0.1
+ *                  |
+ *          private native fd
+ *                  |
+ *              relay thread
+ *                  |
+ *              lwIP socket
+ *                  |
+ *               AX88179
+ *
+ * The relay only sees TLS records.  Encryption, certificates, handshake
+ * state and NSSL semantics remain entirely inside Nintendo's NSSL.
  */
 
+#define NSSL_RELAY_MAX       8
+#define NSSL_RELAY_BUF       4096
+#define NSN_ERR_WOULDBLOCK   6
+#define NSSL_INVALID_FD      (-0x280010)
+
+struct nssl_relay {
+    atomic_int allocated;
+    atomic_int ready;
+    atomic_int stop;
+    atomic_int done;
+
+    int native_fd;
+    int lwfd;
+    int error;
+
+    uint64_t native_to_ax;
+    uint64_t ax_to_native;
+
+    OSThread thread __attribute__((aligned(0x40)));
+    uint8_t stack[16 * 1024] __attribute__((aligned(0x40)));
+
+    uint8_t to_ax[NSSL_RELAY_BUF];
+    uint8_t to_native[NSSL_RELAY_BUF];
+};
+
+static struct nssl_relay nssl_relays[NSSL_RELAY_MAX];
+
+static int nssl_native_would_block(void)
+{
+    return real_socketlasterr() == NSN_ERR_WOULDBLOCK;
+}
+
+static void nssl_relay_reap(void)
+{
+    for (int i = 0; i < NSSL_RELAY_MAX; ++i) {
+        struct nssl_relay *r = &nssl_relays[i];
+
+        if (!atomic_load(&r->allocated))
+            continue;
+
+        if (!atomic_load(&r->done))
+            continue;
+
+        if (!OSIsThreadTerminated(&r->thread))
+            continue;
+
+        OSJoinThread(&r->thread, NULL);
+
+        atomic_store(&r->allocated, 0);
+    }
+}
+
+static int nssl_relay_worker(int slot, const char **argv)
+{
+    (void)argv;
+
+    if (slot < 0 || slot >= NSSL_RELAY_MAX)
+        return -1;
+
+    struct nssl_relay *r = &nssl_relays[slot];
+
+    while (!atomic_load(&r->stop) &&
+           !atomic_load(&r->ready)) {
+        OSSleepTicks(OSMillisecondsToTicks(1));
+    }
+
+    if (atomic_load(&r->stop))
+        goto out;
+
+    int native_fd = r->native_fd;
+    int lwfd = r->lwfd;
+
+    size_t to_ax_off = 0;
+    size_t to_ax_len = 0;
+
+    size_t to_native_off = 0;
+    size_t to_native_len = 0;
+
+    int native_rx_open = 1;
+    int ax_rx_open = 1;
+
+    int ax_wr_shutdown = 0;
+    int native_wr_shutdown = 0;
+
+    int first_native_to_ax = 1;
+    int first_ax_to_native = 1;
+
+    while (!atomic_load(&r->stop)) {
+        int progress = 0;
+
+        /*
+         * Flush encrypted bytes from Nintendo NSSL toward lwIP/AX.
+         */
+        if (to_ax_len) {
+            errno = 0;
+
+            int n = lwip_send(
+                lwfd,
+                r->to_ax + to_ax_off,
+                to_ax_len,
+                MSG_DONTWAIT);
+
+            if (n > 0) {
+                if (first_native_to_ax) {
+                    WHBLogPrintf(
+                        "AX: NSSL relay first NSSL->AX bytes=%d",
+                        n);
+                    first_native_to_ax = 0;
+                }
+
+                r->native_to_ax += (uint64_t)n;
+
+                to_ax_off += (size_t)n;
+                to_ax_len -= (size_t)n;
+
+                if (!to_ax_len)
+                    to_ax_off = 0;
+
+                progress = 1;
+            } else if (n < 0 &&
+                       errno != EWOULDBLOCK &&
+                       errno != EAGAIN) {
+                r->error = 1000 + errno;
+                break;
+            }
+        }
+
+        /*
+         * Pull encrypted TLS records from the local Nintendo NSSL socket.
+         */
+        if (!to_ax_len && native_rx_open) {
+            int n = real_recv(
+                native_fd,
+                r->to_ax,
+                sizeof(r->to_ax),
+                NSN_MSG_DONTWAIT);
+
+            if (n > 0) {
+                to_ax_off = 0;
+                to_ax_len = (size_t)n;
+                progress = 1;
+            } else if (n == 0) {
+                native_rx_open = 0;
+                progress = 1;
+            } else if (!nssl_native_would_block()) {
+                r->error = 2000 + real_socketlasterr();
+                break;
+            }
+        }
+
+        /*
+         * Propagate NSSL's write-side EOF to the real AX connection, while
+         * keeping the reverse direction alive for TLS close_notify/data.
+         */
+        if (!native_rx_open &&
+            !to_ax_len &&
+            !ax_wr_shutdown) {
+            lwip_shutdown(lwfd, SHUT_WR);
+            ax_wr_shutdown = 1;
+            progress = 1;
+        }
+
+        /*
+         * Flush encrypted Internet bytes back toward Nintendo NSSL.
+         */
+        if (to_native_len) {
+            int n = real_send(
+                native_fd,
+                r->to_native + to_native_off,
+                to_native_len,
+                NSN_MSG_DONTWAIT);
+
+            if (n > 0) {
+                if (first_ax_to_native) {
+                    WHBLogPrintf(
+                        "AX: NSSL relay first AX->NSSL bytes=%d",
+                        n);
+                    first_ax_to_native = 0;
+                }
+
+                r->ax_to_native += (uint64_t)n;
+
+                to_native_off += (size_t)n;
+                to_native_len -= (size_t)n;
+
+                if (!to_native_len)
+                    to_native_off = 0;
+
+                progress = 1;
+            } else if (n < 0 &&
+                       !nssl_native_would_block()) {
+                r->error = 3000 + real_socketlasterr();
+                break;
+            }
+        }
+
+        /*
+         * Pull server TLS records from the already-connected lwIP socket.
+         */
+        if (!to_native_len && ax_rx_open) {
+            errno = 0;
+
+            int n = lwip_recv(
+                lwfd,
+                r->to_native,
+                sizeof(r->to_native),
+                MSG_DONTWAIT);
+
+            if (n > 0) {
+                to_native_off = 0;
+                to_native_len = (size_t)n;
+                progress = 1;
+            } else if (n == 0) {
+                ax_rx_open = 0;
+                progress = 1;
+            } else if (errno != EWOULDBLOCK &&
+                       errno != EAGAIN) {
+                r->error = 4000 + errno;
+                break;
+            }
+        }
+
+        /*
+         * Remote server closed its write side: make NSSL observe EOF once
+         * everything already received has been delivered locally.
+         */
+        if (!ax_rx_open &&
+            !to_native_len &&
+            !native_wr_shutdown) {
+            real_shutdown(native_fd, SHUT_WR);
+            native_wr_shutdown = 1;
+            progress = 1;
+        }
+
+        if (!native_rx_open &&
+            !ax_rx_open &&
+            !to_ax_len &&
+            !to_native_len)
+            break;
+
+        if (!progress)
+            OSSleepTicks(OSMillisecondsToTicks(1));
+    }
+
+out:
+    if (r->native_fd >= 0) {
+        real_socketclose(r->native_fd);
+        r->native_fd = -1;
+    }
+
+    if (r->lwfd >= 0) {
+        lwip_close(r->lwfd);
+        r->lwfd = -1;
+    }
+
+    WHBLogPrintf(
+        "AX: NSSL relay end slot=%d nssl_to_ax=%llu ax_to_nssl=%llu err=%d",
+        slot,
+        (unsigned long long)r->native_to_ax,
+        (unsigned long long)r->ax_to_native,
+        r->error);
+
+    atomic_store(&r->done, 1);
+    return 0;
+}
+
+static int nssl_relay_reserve(void)
+{
+    nssl_relay_reap();
+
+    for (int i = 0; i < NSSL_RELAY_MAX; ++i) {
+        int expected = 0;
+
+        if (!atomic_compare_exchange_strong(
+                &nssl_relays[i].allocated,
+                &expected,
+                1))
+            continue;
+
+        struct nssl_relay *r = &nssl_relays[i];
+
+        atomic_store(&r->ready, 0);
+        atomic_store(&r->stop, 0);
+        atomic_store(&r->done, 0);
+
+        r->native_fd = -1;
+        r->lwfd = -1;
+        r->error = 0;
+
+        r->native_to_ax = 0;
+        r->ax_to_native = 0;
+
+        if (!OSCreateThread(
+                &r->thread,
+                nssl_relay_worker,
+                i,
+                NULL,
+                r->stack + sizeof(r->stack),
+                sizeof(r->stack),
+                17,
+                OS_THREAD_ATTRIB_AFFINITY_CPU2)) {
+            atomic_store(&r->allocated, 0);
+            return -1;
+        }
+
+        OSSetThreadName(
+            &r->thread,
+            "AX NSSL relay");
+
+        OSResumeThread(&r->thread);
+
+        return i;
+    }
+
+    return -1;
+}
+
+static void nssl_relay_stop_slot(int slot)
+{
+    if (slot < 0 || slot >= NSSL_RELAY_MAX)
+        return;
+
+    if (!atomic_load(&nssl_relays[slot].allocated))
+        return;
+
+    atomic_store(&nssl_relays[slot].stop, 1);
+}
+
+static void nssl_relay_stop_all(void)
+{
+    int any = 0;
+
+    for (int i = 0; i < NSSL_RELAY_MAX; ++i) {
+        if (atomic_load(&nssl_relays[i].allocated)) {
+            atomic_store(&nssl_relays[i].stop, 1);
+            any = 1;
+        }
+    }
+
+    if (!any)
+        return;
+
+    /*
+     * Relay calls are nonblocking and check stop every iteration, so they
+     * should terminate within a few milliseconds. Keep lifecycle cleanup
+     * bounded anyway.
+     */
+    OSTime deadline =
+        OSGetTime() + OSMillisecondsToTicks(500);
+
+    while (OSGetTime() < deadline) {
+        int alive = 0;
+
+        for (int i = 0; i < NSSL_RELAY_MAX; ++i) {
+            if (!atomic_load(&nssl_relays[i].allocated))
+                continue;
+
+            if (!OSIsThreadTerminated(&nssl_relays[i].thread))
+                alive = 1;
+        }
+
+        if (!alive)
+            break;
+
+        OSSleepTicks(OSMillisecondsToTicks(1));
+    }
+
+    nssl_relay_reap();
+}
+
 /*
- * Promote an AX/lwIP-backed public socket to its native nsysnet
- * placeholder.
- *
- * The placeholder was created with the same socket type/protocol as the
- * lwIP socket. For NSSL we connect that native socket to the same peer,
- * then retire the lwIP side and make the public fd native permanently.
- *
- * Returns:
- *   1    promoted successfully
- *  -1    lwIP peer unavailable
- *  -2    unsupported peer address
- *  -100-N  native connect failed, where N is nsysnet socketlasterr()
+ * Legacy fallback: connect the public native placeholder directly to the
+ * same Internet peer, then discard lwIP.
  */
 static int promote_ax_socket_to_native(int sockfd)
 {
@@ -1958,11 +2344,13 @@ static int promote_ax_socket_to_native(int sockfd)
 
     struct sockaddr_in peer;
     socklen_t peer_len = sizeof(peer);
+
     memset(&peer, 0, sizeof(peer));
 
-    if (lwip_getpeername(lwfd,
-                         (struct sockaddr *)&peer,
-                         &peer_len) != 0)
+    if (lwip_getpeername(
+            lwfd,
+            (struct sockaddr *)&peer,
+            &peer_len) != 0)
         return -1;
 
     if (peer.sin_family != AF_INET)
@@ -1975,27 +2363,18 @@ static int promote_ax_socket_to_native(int sockfd)
     native_peer.sin_port = peer.sin_port;
     native_peer.sin_addr = peer.sin_addr.s_addr;
 
-    /*
-     * The native placeholder has never been connected. Connect it now
-     * while the AX socket is still alive, so failure leaves the old path
-     * untouched.
-     */
     errno = -1;
 
-    int rc = real_connect(sockfd,
-                          (const struct nsn_sockaddr *)&native_peer,
-                          sizeof(native_peer));
+    int rc = real_connect(
+        sockfd,
+        (const struct nsn_sockaddr *)&native_peer,
+        sizeof(native_peer));
 
     if (rc != 0) {
         int native_error = real_socketlasterr();
         return -100 - native_error;
     }
 
-    /*
-     * Native connection succeeded. From this point the public fd belongs
-     * to nsysnet. Clear ownership before closing lwIP so any concurrent
-     * socket operation sees the new native path.
-     */
     untrack_fd(sockfd);
     atomic_store(&mapped_fd[sockfd], -1);
 
@@ -2003,6 +2382,162 @@ static int promote_ax_socket_to_native(int sockfd)
 
     return 1;
 }
+
+
+/*
+ * Turn an AX-backed public socket into the NSSL side of a localhost tunnel.
+ *
+ * The lwIP socket is NOT closed. Ownership moves from open_mask/mapped_fd
+ * to the relay slot.
+ */
+static int bridge_ax_socket_to_nssl(
+    int sockfd,
+    int *relay_slot_out)
+{
+    if (relay_slot_out)
+        *relay_slot_out = -1;
+
+    if (is_foreign(sockfd))
+        return 0;
+
+    int lwfd = stack_fd(sockfd);
+
+    /*
+     * Verify the AX side is already a connected IPv4 TCP socket.
+     */
+    struct sockaddr_in peer;
+    socklen_t peer_len = sizeof(peer);
+
+    memset(&peer, 0, sizeof(peer));
+
+    if (lwip_getpeername(
+            lwfd,
+            (struct sockaddr *)&peer,
+            &peer_len) != 0)
+        return -1;
+
+    if (peer.sin_family != AF_INET)
+        return -2;
+
+    int slot = nssl_relay_reserve();
+
+    if (slot < 0)
+        return -3;
+
+    int listener =
+        real_socket(
+            NSN_AF_INET,
+            SOCK_STREAM,
+            0);
+
+    if (listener < 0) {
+        nssl_relay_stop_slot(slot);
+        return -4;
+    }
+
+    struct nsn_sockaddr_in local;
+    memset(&local, 0, sizeof(local));
+
+    local.sin_family = NSN_AF_INET;
+    local.sin_port = 0;
+    if (lwip_inet_pton(
+            AF_INET,
+            "127.0.0.1",
+            &local.sin_addr) != 1) {
+        real_socketclose(listener);
+        nssl_relay_stop_slot(slot);
+        return -5;
+    }
+
+    if (real_bind(
+            listener,
+            (const struct nsn_sockaddr *)&local,
+            sizeof(local)) != 0) {
+        int e = real_socketlasterr();
+        real_socketclose(listener);
+        nssl_relay_stop_slot(slot);
+        return -100 - e;
+    }
+
+    if (real_listen(listener, 1) != 0) {
+        int e = real_socketlasterr();
+        real_socketclose(listener);
+        nssl_relay_stop_slot(slot);
+        return -200 - e;
+    }
+
+    socklen_t local_len = sizeof(local);
+
+    if (real_getsockname(
+            listener,
+            (struct nsn_sockaddr *)&local,
+            &local_len) != 0) {
+        int e = real_socketlasterr();
+        real_socketclose(listener);
+        nssl_relay_stop_slot(slot);
+        return -300 - e;
+    }
+
+    /*
+     * Connect the title's reserved native placeholder to localhost.
+     * The original hostname is still passed untouched to NSSL later.
+     */
+    if (real_connect(
+            sockfd,
+            (const struct nsn_sockaddr *)&local,
+            sizeof(local)) != 0) {
+        int e = real_socketlasterr();
+        real_socketclose(listener);
+        nssl_relay_stop_slot(slot);
+        return -400 - e;
+    }
+
+    /*
+     * connect() has completed locally, so accept should be immediately
+     * available. This exact path was validated by native_loopback_probe.
+     */
+    int accepted =
+        real_accept(
+            listener,
+            NULL,
+            NULL);
+
+    real_socketclose(listener);
+
+    if (accepted < 0) {
+        int e = real_socketlasterr();
+        nssl_relay_stop_slot(slot);
+        return -500 - e;
+    }
+
+    struct nssl_relay *r =
+        &nssl_relays[slot];
+
+    r->native_fd = accepted;
+    r->lwfd = lwfd;
+
+    /*
+     * From this point the public descriptor is a genuine nsysnet socket
+     * owned by Nintendo NSSL. The private lwIP descriptor belongs solely
+     * to the relay.
+     */
+    untrack_fd(sockfd);
+    atomic_store(&mapped_fd[sockfd], -1);
+
+    atomic_store(&r->ready, 1);
+
+    if (relay_slot_out)
+        *relay_slot_out = slot;
+
+    WHBLogPrintf(
+        "AX: NSSL bridge ready fd=%d lwfd=%d loopback_port=%u",
+        sockfd,
+        lwfd,
+        (unsigned)nsn_ntohs(local.sin_port));
+
+    return 1;
+}
+
 
 DECL_FUNCTION(int32_t, NSSLCreateConnection,
               int32_t context,
@@ -2012,15 +2547,56 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
               int32_t sockfd,
               int32_t block)
 {
-    if (!is_foreign(sockfd))
-        (void)promote_ax_socket_to_native(sockfd);
+    int relay_slot = -1;
+    int bridge_result = 0;
 
-    return real_NSSLCreateConnection(context,
-                                     host,
-                                     hostLength,
-                                     options,
-                                     sockfd,
-                                     block);
+    if (!is_foreign(sockfd)) {
+        if (atomic_load(&nssl_bridge_enabled)) {
+            bridge_result =
+                bridge_ax_socket_to_nssl(
+                    sockfd,
+                    &relay_slot);
+
+            WHBLogPrintf(
+                "AX: NSSL bridge setup fd=%d result=%d host=%.*s",
+                sockfd,
+                bridge_result,
+                host && hostLength > 0 ? hostLength : 0,
+                host ? host : "");
+
+            /*
+             * Do not silently switch to Wi-Fi in bridge mode: that would
+             * make a failed test look successful.
+             */
+            if (bridge_result <= 0)
+                return NSSL_INVALID_FD;
+        } else {
+            (void)promote_ax_socket_to_native(sockfd);
+        }
+    }
+
+    int32_t result =
+        real_NSSLCreateConnection(
+            context,
+            host,
+            hostLength,
+            options,
+            sockfd,
+            block);
+
+    WHBLogPrintf(
+        "AX: NSSLCreateConnection fd=%d result=%d mode=%s",
+        sockfd,
+        result,
+        atomic_load(&nssl_bridge_enabled)
+            ? "bridge"
+            : "native");
+
+    if (relay_slot >= 0 &&
+        result < 0)
+        nssl_relay_stop_slot(relay_slot);
+
+    return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2331,6 +2907,7 @@ fail:
 void nsysnet_shim_stop_accepting(void) {
     atomic_store(&accepting_sockets, 0);
     atomic_store(&probe_owns_accepting, 0);
+    nssl_relay_stop_all();
 }
 void nsysnet_shim_begin_title(void) {
     nsysnet_shim_stop_accepting();
