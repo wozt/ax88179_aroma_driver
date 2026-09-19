@@ -34,7 +34,8 @@
 [ ] perte/restauration link
 [ ] DHCP renew/recovery
 [✓] exhaustion sockets
-[ ] exhaustion buffers
+[✓] exhaustion buffers (capacité native atteinte à débit soutenable)
+[ ] RX burst haute cadence (~147 Mbit/s)
 [ ] charge/concurrence
 
 ## Mario Maker / Pretendo validation — NSSL bridge and SO_TCPSACK (2026-09-18)
@@ -2706,3 +2707,86 @@ This is not yet considered a buffer-capacity parity result.
 
 The next characterization varies sender pacing while keeping the Wii U
 probe, socket count, RCVBUF and datagram size unchanged.
+
+
+## AX UDP pacing matrix isolates high-rate RX loss
+
+After raising the lwIP UDP receive resources, the same eight-socket
+pressure test was repeated with three sender pacing rates.
+
+AX path:
+
+    SO_MYADDR=192.168.2.190
+
+### Fast burst
+
+Measured sender rate:
+
+    gap=500 us
+    actual=146.7 Mbit/s payload
+
+AX retained:
+
+    88 datagrams
+    123200 payload bytes
+
+The distribution was uneven between sockets, indicating loss before
+the per-socket queues became full.
+
+### Medium rate
+
+Measured sender rate:
+
+    gap=2000 us
+    actual=42.4 Mbit/s payload
+
+AX matched the native queue capacity exactly:
+
+    46 datagrams/socket
+    368 datagrams total
+    515200 payload bytes
+
+Recovery:
+
+    sockets=8/8
+    packets=24/24
+
+### Slower rate
+
+Measured sender rate:
+
+    gap=5000 us
+    actual=17.5 Mbit/s payload
+
+AX again matched native exactly:
+
+    46 datagrams/socket
+    368 datagrams total
+    515200 payload bytes
+
+Recovery:
+
+    sockets=8/8
+    packets=24/24
+
+### Conclusion
+
+The enlarged AX/lwIP queues can now hold the same tested UDP receive
+capacity as native nsysnet.
+
+The remaining mismatch is not a buffer-capacity limit.
+
+At approximately 147 Mbit/s of short-burst UDP ingress, frames are lost
+before the socket receive queues reach their configured limits.
+
+The AX network worker currently receives one ethernet frame per
+ax_net_poll() call even when an AX88179 USB bulk transfer already
+contains several additional frames.
+
+The next optimization drains all frames already present in the current
+USB bulk transfer before returning to the outer module loop.
+
+Native UDP SO_RXDATA accounting remains a separate compatibility issue:
+
+    native: payload + 16 bytes/datagram
+    AX:     payload only
