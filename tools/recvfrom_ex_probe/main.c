@@ -359,10 +359,51 @@ int main(void)
         0,
         64);
 
-    probe_say("--- MSG_IP_RECVTTL msglen matrix ---");
+    probe_say("--- msglen=0 edge characterization ---");
+
+    /*
+     * First determine whether a zero metadata length is itself legal when
+     * no extended information is requested.
+     */
+    run_case(
+        fd,
+        nsfd,
+        "ZERO-BASE",
+        0,
+        0);
+
+    /*
+     * Repeat the exact native discrepancy several times.
+     *
+     * If MSG_IP_RECVTTL + msglen=0 rejects the call without consuming
+     * the queued UDP datagram, all three calls should fail while the
+     * following msglen=1 control receives that same head datagram.
+     */
+    run_case(
+        fd,
+        nsfd,
+        "ZERO-TTL-A",
+        MSG_IP_RECVTTL,
+        0);
+
+    run_case(
+        fd,
+        nsfd,
+        "ZERO-TTL-B",
+        MSG_IP_RECVTTL,
+        0);
+
+    run_case(
+        fd,
+        nsfd,
+        "ZERO-TTL-C",
+        MSG_IP_RECVTTL,
+        0);
+
+    probe_say("--- MSG_IP_RECVTTL msglen >= 1 control matrix ---");
 
     static const int lens[] = {
-        0, 1, 2, 4, 8, 16, 64
+        1, 2, 4, 8, 16, 64
     };
 
     for (unsigned i = 0;
