@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import socket
 import time
 
@@ -11,6 +12,21 @@ SOCKETS = 8
 ROUNDS = 3
 PER_SOCKET = 64
 PAYLOAD = 1400
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--gaps-us",
+    default="500,2000,5000",
+    help="comma-separated delay after each round-robin group of 8 packets"
+)
+args = parser.parse_args()
+
+gaps_us = [int(x) for x in args.gaps_us.split(",")]
+
+if len(gaps_us) != ROUNDS:
+    raise SystemExit(
+        f"--gaps-us must contain exactly {ROUNDS} values"
+    )
 
 sock = socket.socket(
     socket.AF_INET,
@@ -25,7 +41,22 @@ print(
     flush=True
 )
 
+print(
+    "pacing matrix: " +
+    ", ".join(f"{x}us" for x in gaps_us),
+    flush=True
+)
+
 for expected_round in range(1, ROUNDS + 1):
+    gap_us = gaps_us[expected_round - 1]
+
+    # Eight packets of 1400 bytes are emitted per pacing interval.
+    nominal_mbps = (
+        SOCKETS * PAYLOAD * 8
+        / (gap_us / 1_000_000)
+        / 1_000_000
+    )
+
     while True:
         data, addr = sock.recvfrom(2048)
         text = data.decode(errors="replace").strip()
@@ -37,14 +68,15 @@ for expected_round in range(1, ROUNDS + 1):
 
     print(
         f"[round {expected_round}] READY from "
-        f"{target_ip} control={addr[1]}",
+        f"{target_ip} control={addr[1]} "
+        f"gap={gap_us}us nominal={nominal_mbps:.1f}Mbit/s",
         flush=True
     )
 
     packets = 0
     total_bytes = 0
+    started = time.monotonic()
 
-    # Round-robin rather than filling socket 0 first.
     for seq in range(PER_SOCKET):
         for index in range(SOCKETS):
             header = (
@@ -67,13 +99,20 @@ for expected_round in range(1, ROUNDS + 1):
             packets += 1
             total_bytes += len(payload)
 
-        # Keep this fast enough to exhaust queues, while avoiding
-        # a pure NIC-ring microburst being the thing we measure.
-        time.sleep(0.0005)
+        time.sleep(gap_us / 1_000_000)
+
+    elapsed = time.monotonic() - started
+
+    actual_mbps = (
+        total_bytes * 8 / elapsed / 1_000_000
+        if elapsed > 0 else 0
+    )
 
     print(
         f"[round {expected_round}] burst sent "
-        f"packets={packets} bytes={total_bytes}",
+        f"packets={packets} bytes={total_bytes} "
+        f"time={elapsed:.3f}s "
+        f"actual={actual_mbps:.1f}Mbit/s",
         flush=True
     )
 
