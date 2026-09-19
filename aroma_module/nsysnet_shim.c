@@ -24,7 +24,7 @@
  * console socket, so the worst case is the Wi-Fi behaviour we had before.
  *
  * Not covered (only usable with native sockets, not shim sockets):
- * gethostbyaddr, netconf_*, socket_lib_init/finish. NSSL itself still
+ * netconf_*, socket_lib_init/finish. NSSL itself still
  * requires a system fd; NSSLCreateConnection is bridged by promoting an
  * AX-backed socket to its reserved native placeholder at the TLS boundary.
  */
@@ -2665,6 +2665,570 @@ DECL_FUNCTION(struct hostent *, gethostbyname, const char *name)
     return h;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Reverse IPv4 DNS / gethostbyaddr                                   */
+
+/*
+ * Native Wii U behaviour measured on hardware:
+ *
+ *   successful IPv4 PTR:
+ *       h_name      = PTR hostname
+ *       h_aliases   = { NULL }
+ *       h_addr_list = { NULL }
+ *       h_addrtype  = AF_INET
+ *       h_length    = 4
+ *
+ *   no PTR / len != 4 / family != AF_INET:
+ *       NULL
+ *
+ * gethostbyaddr() leaves h_errno completely unchanged on both success
+ * and failure.
+ *
+ * lwIP's built-in resolver only understands A/AAAA, so PTR queries use
+ * this small isolated DNS client. It deliberately does not modify
+ * lwIP's dns_table or async resolver state.
+ */
+
+#define PTR_DNS_PORT        53
+#define PTR_DNS_PACKET_MAX  512
+#define PTR_DNS_TIMEOUT_US  750000
+
+static char ghba_name[256];
+static char *ghba_aliases[1] = { NULL };
+static char *ghba_addr_list[1] = { NULL };
+static struct hostent ghba_hostent;
+
+static uint16_t ptr_dns_get16(const uint8_t *p)
+{
+    return (uint16_t)(
+        ((uint16_t)p[0] << 8) |
+        (uint16_t)p[1]);
+}
+
+static void ptr_dns_put16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
+}
+
+static int ptr_dns_encode_name(
+    uint8_t *packet,
+    size_t capacity,
+    size_t *offset,
+    const char *name)
+{
+    size_t pos = *offset;
+    const char *cur = name;
+
+    while (*cur) {
+        const char *dot =
+            strchr(cur, '.');
+
+        size_t n =
+            dot
+                ? (size_t)(dot - cur)
+                : strlen(cur);
+
+        if (n == 0 ||
+            n > 63 ||
+            pos + 1 + n >= capacity)
+            return -1;
+
+        packet[pos++] =
+            (uint8_t)n;
+
+        memcpy(
+            packet + pos,
+            cur,
+            n);
+
+        pos += n;
+
+        if (!dot)
+            break;
+
+        cur = dot + 1;
+    }
+
+    if (pos >= capacity)
+        return -1;
+
+    packet[pos++] = 0;
+    *offset = pos;
+
+    return 0;
+}
+
+/*
+ * Skip one compressed DNS name while consuming only bytes belonging to
+ * the current record.
+ */
+static int ptr_dns_skip_name(
+    const uint8_t *packet,
+    size_t packet_len,
+    size_t *offset)
+{
+    size_t pos = *offset;
+
+    for (unsigned labels = 0;
+         labels < 128;
+         labels++) {
+
+        if (pos >= packet_len)
+            return -1;
+
+        uint8_t c =
+            packet[pos];
+
+        if (c == 0) {
+            *offset = pos + 1;
+            return 0;
+        }
+
+        if ((c & 0xc0) == 0xc0) {
+            if (pos + 1 >= packet_len)
+                return -1;
+
+            *offset = pos + 2;
+            return 0;
+        }
+
+        if ((c & 0xc0) != 0 ||
+            c > 63 ||
+            pos + 1u + c > packet_len)
+            return -1;
+
+        pos += 1u + c;
+    }
+
+    return -1;
+}
+
+/*
+ * Decode a possibly-compressed DNS name. Used for PTR RDATA, where name
+ * compression is legal.
+ */
+static int ptr_dns_decode_name(
+    const uint8_t *packet,
+    size_t packet_len,
+    size_t offset,
+    char *out,
+    size_t out_len)
+{
+    if (!out || out_len == 0)
+        return -1;
+
+    size_t pos = offset;
+    size_t used = 0;
+    unsigned jumps = 0;
+    unsigned labels = 0;
+
+    while (labels++ < 128) {
+        if (pos >= packet_len)
+            return -1;
+
+        uint8_t c =
+            packet[pos];
+
+        if (c == 0) {
+            out[used] = 0;
+            return 0;
+        }
+
+        if ((c & 0xc0) == 0xc0) {
+            if (pos + 1 >= packet_len ||
+                ++jumps > 32)
+                return -1;
+
+            size_t target =
+                (size_t)(
+                    ((uint16_t)(c & 0x3f) << 8) |
+                    packet[pos + 1]);
+
+            if (target >= packet_len)
+                return -1;
+
+            pos = target;
+            continue;
+        }
+
+        if ((c & 0xc0) != 0 ||
+            c > 63 ||
+            pos + 1u + c > packet_len)
+            return -1;
+
+        if (used) {
+            if (used + 1 >= out_len)
+                return -1;
+
+            out[used++] = '.';
+        }
+
+        if (used + c >= out_len)
+            return -1;
+
+        memcpy(
+            out + used,
+            packet + pos + 1,
+            c);
+
+        used += c;
+        pos += 1u + c;
+    }
+
+    return -1;
+}
+
+static int ptr_dns_query_server(
+    const ip_addr_t *server,
+    const char *reverse_name,
+    char *result,
+    size_t result_len)
+{
+    if (!server ||
+        ip_addr_isany(server))
+        return -1;
+
+    uint8_t query[PTR_DNS_PACKET_MAX];
+    memset(query, 0, sizeof(query));
+
+    uint16_t id =
+        (uint16_t)(
+            (uint64_t)OSGetTime() ^
+            (uintptr_t)server ^
+            (uintptr_t)reverse_name);
+
+    ptr_dns_put16(
+        query + 0,
+        id);
+
+    /* RD = recursion desired. */
+    ptr_dns_put16(
+        query + 2,
+        0x0100);
+
+    /* QDCOUNT = 1. */
+    ptr_dns_put16(
+        query + 4,
+        1);
+
+    size_t query_len = 12;
+
+    if (ptr_dns_encode_name(
+            query,
+            sizeof(query),
+            &query_len,
+            reverse_name) < 0)
+        return -1;
+
+    if (query_len + 4 > sizeof(query))
+        return -1;
+
+    /* QTYPE PTR = 12, QCLASS IN = 1. */
+    ptr_dns_put16(
+        query + query_len,
+        12);
+
+    ptr_dns_put16(
+        query + query_len + 2,
+        1);
+
+    query_len += 4;
+
+    int fd =
+        lwip_socket(
+            AF_INET,
+            SOCK_DGRAM,
+            IPPROTO_UDP);
+
+    if (fd < 0)
+        return -1;
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+
+    dst.sin_family =
+        AF_INET;
+
+    dst.sin_port =
+        lwip_htons(PTR_DNS_PORT);
+
+    dst.sin_addr.s_addr =
+        ip_addr_get_ip4_u32(server);
+
+    ssize_t sent =
+        lwip_sendto(
+            fd,
+            query,
+            query_len,
+            0,
+            (const struct sockaddr *)&dst,
+            sizeof(dst));
+
+    if (sent != (ssize_t)query_len) {
+        lwip_close(fd);
+        return -1;
+    }
+
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(fd, &readfds);
+
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = PTR_DNS_TIMEOUT_US;
+
+    int ready =
+        lwip_select(
+            fd + 1,
+            &readfds,
+            NULL,
+            NULL,
+            &timeout);
+
+    if (ready <= 0) {
+        lwip_close(fd);
+        return -1;
+    }
+
+    uint8_t response[PTR_DNS_PACKET_MAX];
+
+    ssize_t received =
+        lwip_recvfrom(
+            fd,
+            response,
+            sizeof(response),
+            0,
+            NULL,
+            NULL);
+
+    lwip_close(fd);
+
+    if (received < 12)
+        return -1;
+
+    size_t packet_len =
+        (size_t)received;
+
+    if (ptr_dns_get16(response + 0) != id)
+        return -1;
+
+    uint16_t flags =
+        ptr_dns_get16(
+            response + 2);
+
+    /* Must be a response, not truncated, and RCODE must be zero. */
+    if ((flags & 0x8000) == 0 ||
+        (flags & 0x0200) != 0 ||
+        (flags & 0x000f) != 0)
+        return -1;
+
+    uint16_t questions =
+        ptr_dns_get16(
+            response + 4);
+
+    uint16_t answers =
+        ptr_dns_get16(
+            response + 6);
+
+    size_t offset = 12;
+
+    for (uint16_t i = 0;
+         i < questions;
+         i++) {
+
+        if (ptr_dns_skip_name(
+                response,
+                packet_len,
+                &offset) < 0)
+            return -1;
+
+        if (offset + 4 > packet_len)
+            return -1;
+
+        offset += 4;
+    }
+
+    for (uint16_t i = 0;
+         i < answers;
+         i++) {
+
+        if (ptr_dns_skip_name(
+                response,
+                packet_len,
+                &offset) < 0)
+            return -1;
+
+        if (offset + 10 > packet_len)
+            return -1;
+
+        uint16_t type =
+            ptr_dns_get16(
+                response + offset);
+
+        uint16_t cls =
+            ptr_dns_get16(
+                response + offset + 2);
+
+        uint16_t rdlen =
+            ptr_dns_get16(
+                response + offset + 8);
+
+        offset += 10;
+
+        if (offset + rdlen > packet_len)
+            return -1;
+
+        if (type == 12 &&
+            cls == 1) {
+
+            if (ptr_dns_decode_name(
+                    response,
+                    packet_len,
+                    offset,
+                    result,
+                    result_len) == 0) {
+
+                return 0;
+            }
+        }
+
+        offset += rdlen;
+    }
+
+    return -1;
+}
+
+static int ptr_dns_lookup_ipv4(
+    const void *addr,
+    char *result,
+    size_t result_len)
+{
+    const uint8_t *b =
+        (const uint8_t *)addr;
+
+    char reverse_name[64];
+
+    int n =
+        snprintf(
+            reverse_name,
+            sizeof(reverse_name),
+            "%u.%u.%u.%u.in-addr.arpa",
+            b[3],
+            b[2],
+            b[1],
+            b[0]);
+
+    if (n < 0 ||
+        (size_t)n >= sizeof(reverse_name))
+        return -1;
+
+    for (u8_t i = 0;
+         i < DNS_MAX_SERVERS;
+         i++) {
+
+        ip_addr_t server;
+        ip_addr_set_zero(&server);
+
+        LOCK_TCPIP_CORE();
+
+        const ip_addr_t *configured =
+            dns_getserver(i);
+
+        if (configured)
+            ip_addr_copy(
+                server,
+                *configured);
+
+        UNLOCK_TCPIP_CORE();
+
+        if (ip_addr_isany(&server))
+            continue;
+
+        if (ptr_dns_query_server(
+                &server,
+                reverse_name,
+                result,
+                result_len) == 0)
+            return 0;
+    }
+
+    return -1;
+}
+
+DECL_FUNCTION(struct hostent *, gethostbyaddr,
+              const void *addr,
+              size_t len,
+              int type)
+{
+    if (!shim_accepts() ||
+        !ax_net_stack_ready()) {
+
+        return real_gethostbyaddr(
+            addr,
+            len,
+            type);
+    }
+
+    /*
+     * Native behaviour:
+     * invalid address/size/family => NULL, without changing h_errno.
+     */
+    if (!addr ||
+        len != 4 ||
+        type != NSN_AF_INET)
+        return NULL;
+
+    /*
+     * Our raw lwIP socket operations can alter errno and lwIP DNS APIs
+     * share h_errno with the shim. Neither is part of the observable
+     * native gethostbyaddr result, so preserve caller state.
+     */
+    int saved_errno =
+        errno;
+
+    int saved_h_errno =
+        h_errno;
+
+    struct hostent *result = NULL;
+
+    if (ptr_dns_lookup_ipv4(
+            addr,
+            ghba_name,
+            sizeof(ghba_name)) == 0) {
+
+        ghba_aliases[0] = NULL;
+        ghba_addr_list[0] = NULL;
+
+        ghba_hostent.h_name =
+            ghba_name;
+
+        ghba_hostent.h_aliases =
+            ghba_aliases;
+
+        ghba_hostent.h_addrtype =
+            NSN_AF_INET;
+
+        ghba_hostent.h_length =
+            4;
+
+        ghba_hostent.h_addr_list =
+            ghba_addr_list;
+
+        result =
+            &ghba_hostent;
+    }
+
+    h_errno =
+        saved_h_errno;
+
+    errno =
+        saved_errno;
+
+    return result;
+}
+
 /*
  * getaddrinfo can answer from either stack, and the caller frees the
  * list through the patched freeaddrinfo. Freeing a list nsysnet
@@ -3523,6 +4087,7 @@ int nsysnet_shim_install(void)
 
     if (!atomic_load(&system_dns)) {
         SHIM_PATCH(gethostbyname);
+        SHIM_PATCH(gethostbyaddr);
         SHIM_PATCH(getaddrinfo);
         SHIM_PATCH(getaddrinfo_rs);
         SHIM_PATCH(getaddrinfo_async);

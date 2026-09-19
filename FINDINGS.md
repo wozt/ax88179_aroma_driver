@@ -1896,3 +1896,52 @@ Note probe :
     probe_say() ne doit pas être appelé depuis un worker secondaire.
     Il met à jour l'UI/SDL. Les workers doivent enregistrer leurs
     résultats puis laisser le thread principal les afficher après join.
+
+
+## gethostbyaddr natif : ABI fermée
+
+Reverse DNS IPv4 mesuré sur matériel :
+
+    8.8.8.8 -> dns.google
+    1.1.1.1 -> one.one.one.one
+
+Hostent positif :
+
+    h_name      = nom PTR
+    h_aliases   = pointeur vers { NULL }
+    h_addr_list = pointeur vers { NULL }
+    h_addrtype  = AF_INET (2)
+    h_length    = 4
+
+Les buffers et le hostent sont statiques/réutilisés entre appels.
+
+Cas négatifs :
+
+    adresse sans PTR -> NULL
+    len != 4         -> NULL
+    family != AF_INET -> NULL
+
+h_errno :
+
+    gethostbyaddr ne le modifie pas.
+
+Test contrôlé :
+
+    initial=1
+    seeded=1
+    before=1
+
+puis, pour succès, absence de PTR, mauvais len et mauvaise famille :
+
+    after=1
+
+Donc le shim AX doit préserver h_errno exactement.
+
+Implémentation AX :
+
+    - PTR DNS IPv4 direct via sockets lwIP
+    - DNS configurés dans lwIP par DHCP
+    - aucun changement dans le resolver A/AAAA lwIP
+    - hostent statique conforme au natif
+    - h_aliases et h_addr_list vides
+    - errno/h_errno préservés
