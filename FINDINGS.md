@@ -32,7 +32,8 @@
 [ ] NSSL Nintendo : détourner le transport TLS vers lwIP/AX
 [✓] hot-unplug / reconnect
 [✓] perte/restauration link
-[ ] DHCP renew/recovery
+[✓] DHCP recovery après recréation interface
+[ ] DHCP renew/rebind à expiration de lease
 [✓] exhaustion sockets
 [✓] exhaustion buffers (capacité native atteinte à débit soutenable)
 [ ] RX burst haute cadence (~147 Mbit/s)
@@ -846,3 +847,76 @@ de latence, puis les réponses sont revenues à quelques millisecondes.
 Conclusion :
 
     perte/restauration link : VALIDÉ
+
+
+## DHCP recovery validé
+
+Le mode :
+
+    dhcp=always
+
+a été testé avec une véritable recréation de l'interface après
+hot-unplug USB.
+
+Séquence validée :
+
+    AX88179 actif
+        |
+        v
+    lease DHCP obtenue
+        |
+        v
+    unplug USB
+        |
+        v
+    interface UHS perdue
+        |
+        v
+    ancien netif supprimé
+        |
+        v
+    replug USB
+        |
+        v
+    nouvel AX88179 open
+        |
+        v
+    nouveau netif lwIP
+        |
+        v
+    nouveau cycle DHCP
+        |
+        v
+    192.168.2.190 opérationnel
+
+Log observé au démarrage :
+
+    AX: config dhcp=always trace=0 dns=system route=ax
+    AX: lease DHCP 192.168.2.190
+
+Après hotplug :
+
+    AX: hotplug recovered 192.168.2.190
+    AX: ready 192.168.2.190
+
+Le chemin réseau et le ping reviennent automatiquement sans reboot.
+
+Le test RJ45 seul a également été répété en mode dhcp=always.
+
+Pendant la coupure câble, le client reste normalement dans son état
+BOUND :
+
+    dhcp=10
+
+puis le trafic reprend immédiatement lorsque le PHY retrouve le link.
+Il n'est donc pas nécessaire de refaire artificiellement un DHCP à
+chaque perte temporaire du câble Ethernet.
+
+Validé :
+
+    [✓] DHCP recovery après recréation interface
+
+Reste à caractériser séparément :
+
+    [ ] renew/rebind lors d'une véritable expiration ou modification
+        de lease DHCP
