@@ -2025,3 +2025,72 @@ Conclusion:
 The real SNDBUF/TXDATA mechanism is now implemented and behaves very
 close to native across most of the characterized range. Exact parity is
 not yet claimed because of the 4096-byte case.
+
+
+## Native TCP receive pressure - partial run
+
+The receive-pressure probe was run through native nsysnet.
+
+Confirmed path:
+
+    SO_MYADDR=192.168.2.124
+
+### Default SO_RCVBUF
+
+Native default:
+
+    SO_RCVBUF=8192
+
+While the application deliberately did not call recv():
+
+    t=250ms  SO_RXDATA=8192
+    t=750ms  SO_RXDATA=8192
+    t=1500ms SO_RXDATA=8192
+
+POLLIN remained asserted.
+
+After the application started draining:
+
+    received=262144/262144
+    EOF=1
+    SO_RXDATA-after=0
+
+This demonstrates that native SO_RCVBUF is operational and that
+SO_RXDATA reflects queued receive data.
+
+### SO_RCVBUF=1
+
+setsockopt and getsockopt succeeded:
+
+    visible RCVBUF=1
+
+While the application did not read:
+
+    SO_RXDATA=1
+
+at 250ms, 750ms and 1500ms.
+
+This is strong evidence that native SO_RCVBUF directly constrains the
+amount of TCP receive data exposed as queued application data.
+
+The connection then progressed extremely slowly. The Wii U probe reached
+its drain deadline and closed the connection after receiving only a
+small amount of data.
+
+The PC sender consequently received BrokenPipe.
+
+### Invalid remainder
+
+The PC peer terminated on that BrokenPipe instead of continuing to the
+next test case.
+
+Therefore the following results from this run are NOT considered valid
+characterizations:
+
+    RCVBUF=4096
+    RCVBUF=8192
+    RCVBUF=16384
+    RCVBUF=65535
+
+The peer must tolerate per-connection BrokenPipe/reset/timeout and
+continue accepting the remaining cases.
