@@ -2836,3 +2836,66 @@ Next experiment:
 - make tcpip_input asynchronous;
 - enlarge the tcpip input-message pool and mailbox so they cannot create
   another artificial 16-packet limit.
+
+
+## Async lwIP input improves but does not solve high-rate RX
+
+After commit 4c793a4, tcpip_input no longer processes RX synchronously
+inside the AX/UHS worker.
+
+The same UDP pacing matrix was repeated.
+
+Results:
+
+    ~145.4 Mbit/s:
+        91 packets
+        127400 payload bytes
+
+    ~42.1 Mbit/s:
+        368 packets
+        515200 payload bytes
+
+    ~17.4 Mbit/s:
+        368 packets
+        515200 payload bytes
+
+All three rounds recovered correctly:
+
+    RECOVERY sockets=8/8
+    packets=24/24
+
+Compared with the previous complete-bulk-drain build:
+
+    fast burst before async lwIP input: 62 packets
+    fast burst after async lwIP input:  91 packets
+
+Asynchronous lwIP input therefore improves high-rate reception, but the
+result remains far below the native queue-capacity target of 368 packets.
+
+### Thread-priority observation
+
+The Wii U Coreinit scheduler uses lower numerical values for higher
+priority and is cooperative.
+
+Current relevant priorities are:
+
+    tcpip thread: Coreinit priority 5
+    AX/UHS worker: Coreinit priority 16
+    watchdog: Coreinit priority 24
+
+TCPIP_THREAD_PRIO is currently 1 and sys_arch maps lwIP priorities using:
+
+    coreinit_priority = 4 + lwip_priority
+
+Therefore the tcpip thread currently runs at priority 5, substantially
+above the USB receive worker.
+
+With asynchronous input and a large tcpip mailbox this ordering can work
+against RX throughput: once the tcpip thread has queued work, it may run
+until it blocks again while the lower-priority UHS worker cannot arm the
+next receive operation.
+
+The next experiment lowers tcpip thread priority to Coreinit 17, one
+level below the existing AX worker at priority 16.
+
+No USB API or queue capacity is changed in this experiment.
