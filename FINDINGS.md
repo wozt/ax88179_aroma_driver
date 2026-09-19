@@ -2094,3 +2094,89 @@ characterizations:
 
 The peer must tolerate per-connection BrokenPipe/reset/timeout and
 continue accepting the remaining cases.
+
+
+## Native TCP RCVBUF and SO_RXDATA characterization
+
+A TCP peer sent 256 KiB while the Wii U application deliberately delayed
+recv() calls.
+
+Confirmed native path:
+
+    SO_MYADDR=192.168.2.124
+
+### Default
+
+Fresh native socket:
+
+    SO_RCVBUF=8192
+
+While the title did not read:
+
+    t=250ms   SO_RXDATA=8192
+    t=750ms   SO_RXDATA=8192
+    t=1500ms  SO_RXDATA=8192
+
+POLLIN remained asserted.
+
+After draining:
+
+    bytes=262144/262144
+    EOF=1
+    SO_RXDATA=0
+
+### Explicit RCVBUF values
+
+RCVBUF=1:
+
+    t=250ms   SO_RXDATA=1
+    t=750ms   SO_RXDATA=1
+    t=1500ms  SO_RXDATA=1
+
+The one-byte receive queue makes progress extremely slowly.
+The probe's 15-second drain deadline expired after 67 bytes, after which
+the connection was closed. The PC had managed to send 2400 bytes before
+receiving BrokenPipe.
+
+This is a probe timeout consequence, not evidence of data corruption.
+
+RCVBUF=4096:
+
+    t=250ms   SO_RXDATA=4080
+    t=750ms   SO_RXDATA=4096
+    t=1500ms  SO_RXDATA=4096
+
+    drain=262144/262144
+    SO_RXDATA-after=0
+
+RCVBUF=8192:
+
+    SO_RXDATA=8192
+    drain=262144/262144
+
+RCVBUF=16384:
+
+    t=250ms   SO_RXDATA=15460
+    t=750ms   SO_RXDATA=16384
+    t=1500ms  SO_RXDATA=16384
+
+    drain=262144/262144
+
+RCVBUF=65535:
+
+    SO_RXDATA=65535
+    drain=262144/262144
+
+### Conclusion
+
+Native nsysnet SO_RCVBUF has real TCP receive-queue semantics.
+
+SO_RXDATA reports the actual amount of application-visible unread TCP
+data and grows until it reaches the configured RCVBUF limit.
+
+The receive queue then applies TCP backpressure while preserving the
+connection; once the title drains data, transmission resumes and the
+full stream is eventually received.
+
+SO_RXDATA returns to zero after the receive queue has been completely
+drained.
