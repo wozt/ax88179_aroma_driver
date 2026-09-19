@@ -1551,3 +1551,38 @@ qui émet l'ioctl /dev/socket 0x32 vers IOSU.
 
 Le comportement sur une résolution encore EAI_INPROGRESS reste à mesurer
 avant de décider de l'implémentation AX.
+
+
+## clear_resolver_cache : requêtes pending non annulées
+
+Le comportement de clear_resolver_cache() pendant une résolution DNS
+asynchrone native réellement en cours a été mesuré.
+
+Séquence :
+
+    getaddrinfo_async("www.netbsd.org")
+        rc=15 (EAI_INPROGRESS)
+        res=NULL
+
+    clear_resolver_cache()
+
+    attente de 750 ms sans aucun nouvel appel getaddrinfo
+
+    getaddrinfo_async("www.netbsd.org")
+        rc=0
+        res valide
+        151.101.1.6
+
+Conclusion observée :
+
+    [✓] clear_resolver_cache ne supprime pas les résultats positifs déjà
+        visibles par getaddrinfo_async
+
+    [✓] clear_resolver_cache n'annule pas une résolution DNS native
+        actuellement EAI_INPROGRESS
+
+Il serait donc incorrect d'émuler cet export comme un vidage complet du
+cache lwIP ou comme une annulation générale des requêtes en vol.
+
+Le dernier comportement plausible à mesurer est le cache négatif :
+clear_resolver_cache pourrait invalider des échecs DNS/NXDOMAIN.
