@@ -915,6 +915,21 @@ DECL_FUNCTION(int, recvfrom_ex,
         return -1;
     }
 
+    /*
+     * Native recvfrom_ex ABI:
+     *
+     * An extra/message output length of zero is rejected with EINVAL,
+     * independently of MSG_IP_RECVTTL, and the pending datagram is not
+     * consumed.
+     *
+     * Native characterization:
+     *   extra_len=0 -> rc=-1, socketlasterr=11 (EINVAL)
+     */
+    if (extra_len == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
     struct sockaddr_in l;
     socklen_t llen = sizeof(l);
     uint8_t recv_ttl = 0;
