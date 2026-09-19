@@ -280,6 +280,9 @@ extern int RPLWRAP(getaddrinfo_rs)(
 extern void RPLWRAP(freeaddrinfo)(
     struct nsn_addrinfo *res);
 
+extern int RPLWRAP(dns_abort_by_hname)(
+    const char *hostname);
+
 typedef int (*raw_getaddrinfo_fn)(
     const char *node,
     const char *service,
@@ -2016,6 +2019,120 @@ static void run_dns_abort_rc_matrix(void)
         "=== END NATIVE DNS ABORT RETURN MATRIX ===");
 }
 
+
+static void run_shim_dns_abort_probe(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== AX SHIM DNS ABORT TEST ===");
+
+    static const char *candidates[] = {
+        "www.openssl.org",
+        "www.libssh2.org",
+        "www.busybox.net",
+        "www.freedesktop.org"
+    };
+
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    const char *host = NULL;
+    int start_rc = 0x7fffffff;
+
+    for (unsigned i = 0;
+         i < sizeof(candidates) / sizeof(candidates[0]);
+         i++) {
+
+        struct nsn_addrinfo *res = NULL;
+
+        start_rc =
+            RPLWRAP(getaddrinfo_async)(
+                candidates[i],
+                "80",
+                &hints,
+                &res);
+
+        if (start_rc == NSN_EAI_INPROGRESS) {
+            host = candidates[i];
+            break;
+        }
+
+        if (start_rc == 0 && res)
+            RPLWRAP(freeaddrinfo)(res);
+    }
+
+    if (!host) {
+        probe_say(
+            "SHIM-ABORT pending test INCONCLUSIVE: all cached");
+    } else {
+        probe_say(
+            "SHIM-ABORT start host=%s rc=%d",
+            host,
+            start_rc);
+
+        int abort_rc =
+            RPLWRAP(dns_abort_by_hname)(
+                host);
+
+        probe_say(
+            "SHIM-ABORT pending-same abort_rc=%d",
+            abort_rc);
+
+        int rc = start_rc;
+        int attempts = 0;
+        struct nsn_addrinfo *res = NULL;
+
+        OSTime deadline =
+            OSGetTime() +
+            OSMillisecondsToTicks(5000);
+
+        while (rc == NSN_EAI_INPROGRESS &&
+               OSGetTime() < deadline) {
+
+            OSSleepTicks(
+                OSMillisecondsToTicks(10));
+
+            res = NULL;
+
+            rc =
+                RPLWRAP(getaddrinfo_async)(
+                    host,
+                    "80",
+                    &hints,
+                    &res);
+
+            attempts++;
+        }
+
+        probe_say(
+            "SHIM-ABORT pending-same final=%d attempts=%d res=%08x",
+            rc,
+            attempts,
+            (unsigned)(uintptr_t)res);
+
+        if (rc == 0 && res)
+            RPLWRAP(freeaddrinfo)(res);
+    }
+
+    /*
+     * Native returns 0 even if no matching request exists.
+     */
+    int missing_rc =
+        RPLWRAP(dns_abort_by_hname)(
+            "ax88179-shim-abort-no-request.invalid");
+
+    probe_say(
+        "SHIM-ABORT no-request rc=%d",
+        missing_rc);
+
+    probe_say(
+        "=== END AX SHIM DNS ABORT TEST ===");
+}
+
 static void run_shim_dns_probe(void)
 {
     probe_say("%s", "");
@@ -2249,6 +2366,8 @@ int main(void)
     run_dns_abort_probe();
 
     run_dns_abort_rc_matrix();
+
+    run_shim_dns_abort_probe();
 
     run_shim_dns_probe();
 
