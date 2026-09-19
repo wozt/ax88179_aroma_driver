@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <coreinit/dynload.h>
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
@@ -26,6 +27,7 @@ static struct export_desc exports[] = {
     { "getaddrinfo_async_rs", NULL },
     { "getaddrinfo_rs",       NULL },
     { "gethostbyaddr",        NULL },
+    { "get_h_errno",          NULL },
     { "dns_abort_by_hname",   NULL },
     { "clear_resolver_cache", NULL },
     { "set_resolver_allocator", NULL },
@@ -2020,6 +2022,270 @@ static void run_dns_abort_rc_matrix(void)
 }
 
 
+
+/* ------------------------------------------------------------------ */
+/* Native gethostbyaddr behaviour                                     */
+
+typedef struct hostent *(*raw_gethostbyaddr_fn)(
+    const void *addr,
+    size_t len,
+    int type);
+
+typedef int *(*raw_get_h_errno_fn)(void);
+
+struct ghba_case {
+    const char *label;
+    const char *ip;
+    size_t len;
+    int type;
+};
+
+static const struct ghba_case ghba_cases[] = {
+    { "google",      "8.8.8.8",     4, 2 },
+    { "cloudflare",  "1.1.1.1",     4, 2 },
+    { "no-ptr",      "192.0.2.1",   4, 2 },
+    { "bad-len",     "8.8.8.8",     3, 2 },
+    { "bad-family",  "8.8.8.8",     4, 0 },
+};
+
+static void dump_native_hostent(
+    const char *label,
+    struct hostent *h)
+{
+    if (!h) {
+        probe_say(
+            "GHBA %-12s hostent=NULL",
+            label);
+        return;
+    }
+
+    probe_say(
+        "GHBA %-12s hostent=%08x name=%s type=%d len=%d",
+        label,
+        (unsigned)(uintptr_t)h,
+        h->h_name ? h->h_name : "(null)",
+        h->h_addrtype,
+        h->h_length);
+
+    int aliases = 0;
+
+    if (h->h_aliases) {
+        while (h->h_aliases[aliases] &&
+               aliases < 8) {
+
+            probe_say(
+                "  alias[%d]=%s",
+                aliases,
+                h->h_aliases[aliases]);
+
+            aliases++;
+        }
+    }
+
+    probe_say(
+        "  aliases=%d",
+        aliases);
+
+    int addresses = 0;
+
+    if (h->h_addr_list) {
+        while (h->h_addr_list[addresses] &&
+               addresses < 8) {
+
+            char ip[64] = "?";
+
+            if (h->h_addrtype == 2 &&
+                h->h_length == 4) {
+
+                inet_ntop(
+                    AF_INET,
+                    h->h_addr_list[addresses],
+                    ip,
+                    sizeof(ip));
+            }
+
+            probe_say(
+                "  addr[%d]=%s",
+                addresses,
+                ip);
+
+            addresses++;
+        }
+    }
+
+    probe_say(
+        "  addresses=%d",
+        addresses);
+}
+
+static int get_native_h_errno(
+    raw_get_h_errno_fn fn)
+{
+    if (!fn)
+        return 0x7fffffff;
+
+    int *p = fn();
+
+    if (!p)
+        return 0x7ffffffe;
+
+    return *p;
+}
+
+static int gethostbyaddr_worker(
+    int argc,
+    const char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    raw_gethostbyaddr_fn ghba =
+        (raw_gethostbyaddr_fn)find_export_addr(
+            "gethostbyaddr");
+
+    raw_get_h_errno_fn getherr =
+        (raw_get_h_errno_fn)find_export_addr(
+            "get_h_errno");
+
+    if (!ghba || !getherr) {
+        probe_say(
+            "GHBA missing native export");
+
+        atomic_store(
+            &behavior_done,
+            1);
+
+        return -1;
+    }
+
+    for (unsigned i = 0;
+         i < sizeof(ghba_cases) /
+             sizeof(ghba_cases[0]);
+         i++) {
+
+        const struct ghba_case *c =
+            &ghba_cases[i];
+
+        struct in_addr addr;
+
+        if (inet_pton(
+                AF_INET,
+                c->ip,
+                &addr) != 1) {
+
+            probe_say(
+                "GHBA %s inet_pton FAIL",
+                c->label);
+
+            continue;
+        }
+
+        /*
+         * Put a recognizable value in h_errno before the call so we
+         * can determine whether success/failure updates it.
+         */
+        int *herrp = getherr();
+
+        if (herrp)
+            *herrp = 0x12345678;
+
+        OSTime begin =
+            OSGetTime();
+
+        struct hostent *h =
+            ghba(
+                &addr,
+                c->len,
+                c->type);
+
+        uint64_t elapsed =
+            OSTicksToMilliseconds(
+                OSGetTime() - begin);
+
+        int herr =
+            get_native_h_errno(
+                getherr);
+
+        probe_say(
+            "GHBA %-12s ip=%s len=%u type=%d result=%08x h_errno=%d ms=%llu",
+            c->label,
+            c->ip,
+            (unsigned)c->len,
+            c->type,
+            (unsigned)(uintptr_t)h,
+            herr,
+            (unsigned long long)elapsed);
+
+        dump_native_hostent(
+            c->label,
+            h);
+    }
+
+    atomic_store(
+        &behavior_done,
+        1);
+
+    return 0;
+}
+
+static void run_gethostbyaddr_probe(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== NATIVE GETHOSTBYADDR TEST ===");
+
+    atomic_store(
+        &behavior_done,
+        0);
+
+    BOOL created =
+        OSCreateThread(
+            &behavior_thread,
+            gethostbyaddr_worker,
+            0,
+            NULL,
+            behavior_stack +
+                sizeof(behavior_stack),
+            sizeof(behavior_stack),
+            16,
+            OS_THREAD_ATTRIB_AFFINITY_ANY);
+
+    if (!created) {
+        probe_say(
+            "GHBA worker OSCreateThread FAIL");
+        return;
+    }
+
+    OSSetThreadName(
+        &behavior_thread,
+        "AX gethostbyaddr probe");
+
+    OSResumeThread(
+        &behavior_thread);
+
+    while (!atomic_load(
+               &behavior_done)) {
+
+        probe_poll();
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+    }
+
+    int thread_result = -1;
+
+    OSJoinThread(
+        &behavior_thread,
+        &thread_result);
+
+    probe_say(
+        "GHBA worker result=%d",
+        thread_result);
+
+    probe_say(
+        "=== END NATIVE GETHOSTBYADDR TEST ===");
+}
+
 static void run_shim_dns_abort_probe(void)
 {
     probe_say("%s", "");
@@ -2366,6 +2632,8 @@ int main(void)
     run_dns_abort_probe();
 
     run_dns_abort_rc_matrix();
+
+    run_gethostbyaddr_probe();
 
     run_shim_dns_abort_probe();
 
