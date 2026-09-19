@@ -175,7 +175,7 @@ static uint8_t g_rx[RX_BUFFER_SIZE]
     __attribute__((aligned(0x40)));
 
 static uint8_t g_rx_async[RX_ASYNC_SLOTS][RX_BUFFER_SIZE]
-    __attribute__((aligned(0x100)));
+    __attribute__((aligned(0x40)));
 
 enum {
     AX_RX_SLOT_IDLE = 0,
