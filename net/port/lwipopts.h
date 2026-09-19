@@ -12,7 +12,7 @@
  * consumes roughly 45 Ethernet-sized pbufs, so the old pool of 48 left
  * effectively no headroom for ARP/DHCP/other traffic.
  */
-#define PBUF_POOL_SIZE 96
+#define PBUF_POOL_SIZE 512
 #define PBUF_POOL_BUFSIZE 1600
 #define LWIP_IPV4 1
 #define LWIP_IPV6 0
@@ -69,7 +69,7 @@
  * lwIP defaults MEMP_NUM_NETBUF to only 2, which caused bursts such as
  * NEX/NNCS to keep the first two packets and silently drop the rest.
  */
-#define MEMP_NUM_NETBUF 32
+#define MEMP_NUM_NETBUF 512
 #define MEMP_NUM_NETCONN 32
 #define LWIP_SOCKET_OFFSET 0
 #define MEMP_NUM_TCPIP_MSG_INPKT 16
@@ -96,7 +96,7 @@
  * queued data near 16 * 1460 = 23360 bytes.
  */
 #define DEFAULT_TCP_RECVMBOX_SIZE 64
-#define DEFAULT_UDP_RECVMBOX_SIZE 32
+#define DEFAULT_UDP_RECVMBOX_SIZE 64
 #define DEFAULT_ACCEPTMBOX_SIZE 8
 #define LWIP_SO_RCVTIMEO 1
 #define LWIP_SO_RCVBUF 1
