@@ -20,7 +20,7 @@
 [✓] émission multicast réelle
 
 [✓] limites négatives exactes SNDBUF/RCVBUF
-[ ] comportement réel SNDBUF / backpressure
+[ ] parité exacte SNDBUF / backpressure (écart résiduel à 4096)
 [✓] TCP listen / accept réel
 [✓] sendto_multi_ex
 [✓] recvfrom_multi
@@ -1922,3 +1922,106 @@ Conclusion:
 
 A real per-PCB send-buffer limit and real transmit-data accounting are
 required inside lwIP. Pure ABI state in nsysnet_shim.c is insufficient.
+
+
+## AX real TCP backpressure after per-PCB SNDBUF fix
+
+After adding a real per-PCB TCP send-buffer limit to lwIP, the
+backpressure probe was repeated through AX.
+
+Confirmed path:
+
+    SO_MYADDR=192.168.2.190
+
+### ABI
+
+All tested negative SO_SNDBUF and SO_RCVBUF values still matched native
+nsysnet exactly, including INT_MIN.
+
+### SNDBUF=0
+
+Native:
+
+    setsockopt succeeds
+    subsequent nonblocking connect does not become writable
+
+AX after fix:
+
+    setsockopt succeeds
+    subsequent nonblocking connect does not become writable
+
+The special zero-buffer behaviour is therefore reproduced by the tested
+probe.
+
+### Real TCP backpressure
+
+Comparison:
+
+    setting          native bytes   AX bytes
+
+    default / 8192      13040         13140
+    1                    2720          2920
+    4096                 8560          5840
+    8192                13040         13140
+    16384               21800         21900
+    65535               69980         69915
+
+The number of send() calls before EWOULDBLOCK also matched native for
+every tested value except 4096.
+
+The previous AX behaviour was a fixed:
+
+    27740 bytes
+
+for every SO_SNDBUF value.
+
+Therefore SO_SNDBUF now materially controls real TCP backpressure.
+
+### SO_TXDATA
+
+SO_TXDATA now reports real outstanding transmit state rather than zero.
+
+Examples:
+
+    SNDBUF=8192:
+        native TXDATA=8760
+        AX     TXDATA=8760
+
+    SNDBUF=16384:
+        native TXDATA=17520
+        AX     TXDATA=17520
+
+Small residual differences remain at the low and maximum values:
+
+    SNDBUF=1:
+        native=1360
+        AX=1460
+
+    SNDBUF=4096:
+        native=4280
+        AX=4380
+
+    SNDBUF=65535:
+        native=65700
+        AX=65535
+
+### Remaining discrepancy
+
+SO_SNDBUF=4096 remains the only large backpressure discrepancy:
+
+    native:
+        bytes=8560
+        sends=6
+
+    AX:
+        bytes=5840
+        sends=4
+
+This is retained as an explicit compatibility gap rather than hidden by
+the otherwise successful result.
+
+Conclusion:
+
+The real SNDBUF/TXDATA mechanism is now implemented and behaves very
+close to native across most of the characterized range. Exact parity is
+not yet claimed because of the 4096-byte case.
