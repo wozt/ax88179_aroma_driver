@@ -1245,3 +1245,114 @@ Conclusion:
 The tested native nsysnet TCP server behaviour is reproduced by the
 AX/lwIP shim for listen, backlog, accept, endpoint reporting, ordinary
 RX/TX, 128 KiB transfer and bidirectional TCP half-close semantics.
+
+
+## Socket exhaustion AX characterization
+
+The socket exhaustion probe was first run through the AX/lwIP path.
+
+Path:
+
+    route=ax
+    SO_MYADDR=192.168.2.190
+
+The result was perfectly stable across three complete allocate/free
+cycles.
+
+### TCP
+
+Each round produced:
+
+    count=8
+    public fd range=4..11
+    fd mask=0x00000ff0
+
+The next socket() failed with:
+
+    errno=105
+    socketlasterr=1
+
+In the established nsysnet error mapping:
+
+    errno 105 = ENOBUFS
+    nsysnet error 1 = ENOBUFS
+
+All eight sockets then closed successfully:
+
+    close errors=0
+
+An immediate new TCP socket succeeded again:
+
+    fd=4
+    errno=0
+
+### UDP
+
+Each round produced:
+
+    count=7
+    public fd range=4..10
+    fd mask=0x000007f0
+
+The next socket() failed with:
+
+    errno=105
+    socketlasterr=1
+
+All seven sockets closed successfully and an immediate new UDP socket
+again returned fd 4.
+
+### Mixed TCP/UDP
+
+Alternating TCP and UDP sockets produced:
+
+    total=15
+    TCP=8
+    UDP=7
+    public fd mask=0x0007fff0
+
+Saturation again produced:
+
+    errno=105 / ENOBUFS
+    socketlasterr=1 / ENOBUFS
+
+All 15 descriptors closed without error.
+
+Immediately afterwards both socket types could be allocated again:
+
+    TCP fd=4
+    UDP fd=5
+
+### Reclamation / leak result
+
+All three rounds were identical:
+
+    TCP   8, 8, 8
+    UDP   7, 7, 7
+    MIXED 15, 15, 15
+
+No progressive capacity loss was observed.
+
+Therefore no socket/PCB/netconn leak is visible across the tested
+allocate -> exhaust -> close -> reallocate cycles.
+
+### Relation to current lwIP pools
+
+The current stack is configured with:
+
+    MEMP_NUM_TCP_PCB=8
+    MEMP_NUM_UDP_PCB=8
+    MEMP_NUM_NETCONN=16
+
+The measured AX limits correspond closely to these configured resource
+pools.
+
+One UDP/netconn-sized resource appears to already be occupied during
+the probe. WHB UDP logging uses a persistent UDP socket, so logging
+infrastructure is a likely contributor. This must not be treated as a
+final explanation until compared with the native reference and, if
+needed, isolated explicitly.
+
+This AX run is a characterization only. Socket exhaustion compatibility
+is not marked validated until the identical probe is run on native
+nsysnet.
