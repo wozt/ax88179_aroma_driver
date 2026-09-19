@@ -1648,3 +1648,46 @@ Conclusion pratique pour le shim AX :
 
 Un flush lwIP complet serait plus agressif que le comportement natif
 mesuré.
+
+
+## dns_abort_by_hname : premier test natif
+
+Une résolution positive réellement non cachée a été démarrée :
+
+    getaddrinfo_async("www.rust-lang.org")
+        -> EAI_INPROGRESS (15)
+
+Puis immédiatement :
+
+    dns_abort_by_hname("www.rust-lang.org")
+        -> rc=0
+
+Après 750 ms sans polling :
+
+    getaddrinfo_async("www.rust-lang.org")
+        -> rc=0
+        -> résultat valide
+
+Le contrôle sans abort donne également :
+
+    getaddrinfo_async("www.llvm.org")
+        -> EAI_INPROGRESS
+        -> 750 ms
+        -> rc=0
+
+Conclusion :
+
+Le résultat DNS continue à devenir disponible après
+dns_abort_by_hname() dans ce scénario.
+
+Cela ne suffit toutefois pas à conclure que l'export est un no-op :
+les résolutions DNS positives observées sur ce réseau terminent souvent
+en environ 10 à 15 ms, donc une course entre la réponse DNS et l'ioctl
+d'annulation reste possible.
+
+Il faut encore caractériser :
+    - le code retour sans requête correspondante ;
+    - le code retour avec une entrée déjà résolue ;
+    - le code retour avec pending même hostname ;
+    - le code retour avec pending autre hostname ;
+    - le wrapper PowerPC complet de l'export.
