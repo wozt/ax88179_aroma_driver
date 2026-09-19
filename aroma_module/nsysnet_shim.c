@@ -1964,6 +1964,9 @@ DECL_FUNCTION(int, socketlasterr, void)
 #define NSSL_RELAY_MAX       8
 #define NSSL_RELAY_BUF       4096
 #define NSN_ERR_WOULDBLOCK   6
+#define NSN_ERR_CONNRESET    8
+#define NSN_ERR_NOTCONN      9
+#define NSN_ERR_PIPE         13
 #define NSSL_INVALID_FD      (-0x280010)
 
 struct nssl_relay {
@@ -1991,6 +1994,13 @@ static struct nssl_relay nssl_relays[NSSL_RELAY_MAX];
 static int nssl_native_would_block(void)
 {
     return real_socketlasterr() == NSN_ERR_WOULDBLOCK;
+}
+
+static int nssl_native_peer_closed(int error)
+{
+    return error == NSN_ERR_CONNRESET ||
+           error == NSN_ERR_NOTCONN ||
+           error == NSN_ERR_PIPE;
 }
 
 static void nssl_relay_reap(void)
@@ -2150,10 +2160,22 @@ static int nssl_relay_worker(int slot, const char **argv)
                     to_native_off = 0;
 
                 progress = 1;
-            } else if (n < 0 &&
-                       !nssl_native_would_block()) {
-                r->error = 3000 + real_socketlasterr();
-                break;
+            } else if (n < 0) {
+                int native_error = real_socketlasterr();
+
+                if (native_error == NSN_ERR_WOULDBLOCK) {
+                    /* Try again later. */
+                } else if (nssl_native_peer_closed(native_error)) {
+                    /*
+                     * NSSL has finished with this local transport.
+                     * Any remaining server bytes are no longer useful.
+                     */
+                    to_native_len = 0;
+                    break;
+                } else {
+                    r->error = 3000 + native_error;
+                    break;
+                }
             }
         }
 
