@@ -2579,3 +2579,82 @@ property for this receive path.
 
 Global native buffer exhaustion has not yet been reached: the
 per-socket RCVBUF limit was reached first.
+
+
+## AX UDP global buffer exhaustion before capacity fix
+
+The native UDP buffer-pressure probe was repeated unchanged through
+the AX/lwIP path.
+
+Confirmed AX path:
+
+    SO_MYADDR=192.168.2.190
+
+Configuration at the time included:
+
+    MEMP_NUM_NETBUF=32
+    PBUF_POOL_SIZE=96
+    DEFAULT_UDP_RECVMBOX_SIZE=32
+
+The peer sent, per round:
+
+    512 datagrams
+    1400 payload bytes/datagram
+    716800 payload bytes total
+
+AX retained exactly:
+
+    32 datagrams
+    44800 payload bytes
+
+in every round.
+
+Observed totals:
+
+    round 1: packets=32 bytes=44800
+    round 2: packets=32 bytes=44800
+    round 3: packets=32 bytes=44800
+
+The distribution between sockets varied slightly because packets were
+sent round-robin and resource allocation timing varied, but the global
+total remained exactly 32.
+
+After draining, all recovery datagrams were received on all sockets:
+
+    RECOVERY sockets=8/8 packets=24
+
+for all three rounds.
+
+This proves:
+
+- MEMP_NUM_NETBUF=32 is currently the first global UDP queue limit;
+- resources are correctly released after drain;
+- no progressive leak was observed over three rounds.
+
+Native nsysnet retained, in the same test:
+
+    368 datagrams
+    515200 payload bytes
+
+simultaneously.
+
+Two additional AX limits would become relevant after increasing
+MEMP_NUM_NETBUF:
+
+    DEFAULT_UDP_RECVMBOX_SIZE=32
+
+is below the native per-socket result of 46 queued datagrams, and:
+
+    PBUF_POOL_SIZE=96
+
+is far below the 368 simultaneously queued native datagrams.
+
+The UDP receive resource pools therefore need to be raised together.
+
+One separate semantic mismatch remains:
+
+    native UDP SO_RXDATA counts 1416 bytes per 1400-byte datagram
+    AX UDP SO_RXDATA currently counts 1400 bytes
+
+That SO_RXDATA accounting difference is retained as a separate
+compatibility issue and is not part of this capacity fix.
