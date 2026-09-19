@@ -21,6 +21,7 @@
 
 [✓] limites négatives exactes SNDBUF/RCVBUF
 [ ] parité exacte SNDBUF / backpressure (écart résiduel à 4096)
+[ ] parité réelle RCVBUF / SO_RXDATA
 [✓] TCP listen / accept réel
 [✓] sendto_multi_ex
 [✓] recvfrom_multi
@@ -2180,3 +2181,60 @@ full stream is eventually received.
 
 SO_RXDATA returns to zero after the receive queue has been completely
 drained.
+
+
+## AX TCP RCVBUF mismatch before receive-window fix
+
+The native TCP receive-pressure characterization was repeated unchanged
+through the AX/lwIP path.
+
+Confirmed path:
+
+    SO_MYADDR=192.168.2.190
+
+The visible SO_RCVBUF values matched the requested values, but the real
+TCP receive queue did not follow them.
+
+Observed AX SO_RXDATA:
+
+    default RCVBUF=8192:
+        RXDATA=23360
+
+    RCVBUF=1:
+        RXDATA -> 18980 then 23360
+
+    RCVBUF=4096:
+        RXDATA -> 18980 then 23360
+
+    RCVBUF=8192:
+        RXDATA -> 18980 then 23360
+
+    RCVBUF=16384:
+        RXDATA -> 18980 then 23360
+
+    RCVBUF=65535:
+        RXDATA=23360
+
+All six AX connections successfully drained the complete:
+
+    262144/262144 bytes
+
+including RCVBUF=1.
+
+This differs strongly from native nsysnet, where SO_RXDATA saturates at
+the actual configured RCVBUF and a one-byte buffer creates extreme TCP
+backpressure.
+
+The fixed 23360-byte AX ceiling corresponds to the current lwIP TCP
+receive window rather than the requested per-socket SO_RCVBUF.
+
+The lwIP netconn implementation explicitly does not enforce recv_bufsize
+against TCP recvmbox data; TCP flow control is expected to be implemented
+through the TCP receive window instead.
+
+Conclusion:
+
+The title-visible RCVBUF ABI already matches, but real TCP receive flow
+control does not.
+
+A per-PCB receive-window limit controlled by SO_RCVBUF is required.
