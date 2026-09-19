@@ -3340,6 +3340,32 @@ static void async_dns_reset_all(void)
     async_dns_unlock();
 }
 
+/*
+ * Native Wii U behaviour measured on hardware:
+ *
+ * dns_abort_by_hname() returns 0 whether the hostname has no request,
+ * is already cached, matches a pending query, or differs from a pending
+ * query. A pending getaddrinfo_async() also remains able to complete
+ * normally after the call.
+ *
+ * Do not perform a stronger lwIP cancellation than the native observable
+ * behaviour. When AX DNS is active this is intentionally a successful
+ * no-op.
+ */
+DECL_FUNCTION(int, dns_abort_by_hname,
+              const char *hostname)
+{
+    if (!shim_accepts() ||
+        !ax_net_stack_ready()) {
+
+        return real_dns_abort_by_hname(
+            hostname);
+    }
+
+    (void)hostname;
+    return 0;
+}
+
 DECL_FUNCTION(void, freeaddrinfo, struct nsn_addrinfo *res)
 {
     if (!ai_is_ours(res)) { real_freeaddrinfo(res); return; }
@@ -3501,6 +3527,7 @@ int nsysnet_shim_install(void)
         SHIM_PATCH(getaddrinfo_rs);
         SHIM_PATCH(getaddrinfo_async);
         SHIM_PATCH(getaddrinfo_async_rs);
+        SHIM_PATCH(dns_abort_by_hname);
         SHIM_PATCH(freeaddrinfo);
         SHIM_PATCH(getnameinfo);
         SHIM_PATCH(get_h_errno);
