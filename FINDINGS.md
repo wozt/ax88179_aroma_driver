@@ -1356,3 +1356,36 @@ needed, isolated explicitly.
 This AX run is a characterization only. Socket exhaustion compatibility
 is not marked validated until the identical probe is run on native
 nsysnet.
+
+
+## Socket exhaustion AX repeat validation
+
+A second socket-exhaustion run was performed, but the module was still
+in AX routing mode rather than native reference mode.
+
+Confirmed path:
+
+    title traffic routed through AX88179
+    SO_MYADDR=192.168.2.190
+
+The result exactly reproduced the previous AX run for all three rounds:
+
+    TCP   = 8 sockets
+    UDP   = 7 sockets
+    MIXED = 15 sockets (8 TCP + 7 UDP)
+
+Every saturation point returned:
+
+    errno=105 = ENOBUFS
+    socketlasterr=1 = ENOBUFS
+
+Every close sequence completed with zero errors.
+
+Immediate socket reallocation after exhaustion succeeded in every round.
+
+This independently reconfirms that the current AX socket pools are
+stable across repeated exhaustion/reclamation cycles and show no
+progressive resource leak.
+
+This run is NOT the native reference because both the routing log and
+SO_MYADDR confirmed the AX path.
