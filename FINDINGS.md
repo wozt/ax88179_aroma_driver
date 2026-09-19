@@ -21,7 +21,7 @@
 
 [ ] limites négatives exactes SNDBUF/RCVBUF
 [ ] comportement réel SNDBUF / backpressure
-[ ] TCP listen / accept réel
+[✓] TCP listen / accept réel
 [✓] sendto_multi_ex
 [✓] recvfrom_multi
 [✓] recvfrom_ex avec vrai TTL
@@ -1161,3 +1161,87 @@ Final native result:
     TCP SERVER RESULT: PASS
 
 This is now the reference behaviour for the equivalent AX/lwIP test.
+
+
+## TCP server AX parity validation
+
+The native TCP server reference test was repeated unchanged through the
+AX88179/lwIP shim.
+
+Path:
+
+    route=ax
+    interface=192.168.2.190
+    listener=192.168.2.190:19010
+
+### Listen / accept
+
+The listener successfully used:
+
+    socket(AF_INET, SOCK_STREAM)
+    bind(INADDR_ANY, 19010)
+    listen(backlog=2)
+
+Two clients connected before either connection was serviced.
+
+Both were accepted successfully:
+
+    accepted fd=5
+    accepted fd=6
+
+Accepted socket endpoint information was correct:
+
+    local=192.168.2.190:19010
+    peer=192.168.2.100:<ephemeral port>
+    SO_TYPE=SOCK_STREAM
+
+Both short request/reply exchanges succeeded.
+
+Result:
+
+    BACKLOG/SHORT CONNECTIONS: PASS
+
+### Bulk transfer / half-close
+
+A third accepted TCP connection received:
+
+    131072 bytes
+
+FNV-1a integrity:
+
+    received = 37309dc5
+    expected = 37309dc5
+
+The PC then performed:
+
+    shutdown(SHUT_WR)
+
+The AX-side recv() correctly returned EOF:
+
+    eof=1
+
+The Wii U was still able to send the `BULK-OK` response after receiving
+EOF, confirming correct TCP half-close semantics.
+
+The Wii U then performed:
+
+    shutdown(SHUT_WR) -> rc=0
+
+The PC received the reply and then observed:
+
+    recv() = b''
+
+confirming the server-side FIN.
+
+Final results:
+
+    BACKLOG/SHORT CONNECTIONS: PASS
+    BULK DATA + HALF-CLOSE: PASS
+    TCP SERVER RESULT: PASS
+    TCP SERVER PEER: PASS
+
+Conclusion:
+
+The tested native nsysnet TCP server behaviour is reproduced by the
+AX/lwIP shim for listen, backlog, accept, endpoint reporting, ordinary
+RX/TX, 128 KiB transfer and bidirectional TCP half-close semantics.
