@@ -1196,3 +1196,56 @@ Le transport Nintendo NSSL via :
     AX88179
 
 est désormais fonctionnel et se ferme proprement.
+
+
+## Super Smash Bros. for Wii U : match en ligne réel validé
+
+Un test réel a été effectué avec Super Smash Bros. for Wii U sur Pretendo.
+
+Le jeu a réussi à :
+
+    - accéder aux services en ligne
+    - établir les connexions NSSL nécessaires
+    - effectuer le matchmaking
+    - trouver un véritable joueur distant
+    - démarrer une partie
+    - jouer la partie en ligne
+
+Les connexions NSSL observées concernaient notamment :
+
+    discovery.olv.pretendo.cc
+    api.olv.pretendo.cc
+
+Toutes ont utilisé le bridge :
+
+    Nintendo NSSL
+        |
+    socket native localhost
+        |
+    relay PPC
+        |
+    lwIP
+        |
+    AX88179
+
+Résultats NSSL :
+
+    NSSL bridge setup result=1
+    NSSLCreateConnection result=0
+    trafic bidirectionnel observé
+    relay end err=0
+
+Le trafic de gameplay lui-même ne correspond pas aux connexions OLV
+affichées dans ces logs et passe vraisemblablement par les APIs réseau
+de jeu / NEX / P2P via le shim nsysnet.
+
+Le succès d'une partie contre un véritable joueur constitue donc une
+validation en conditions réelles bien plus large que le seul bridge TLS.
+
+Conclusion :
+
+    [✓] Smash 4 : accès Pretendo
+    [✓] Smash 4 : NSSL via AX88179
+    [✓] Smash 4 : matchmaking réel
+    [✓] Smash 4 : connexion P2P / gameplay réel
+    [✓] Smash 4 : partie en ligne complète
