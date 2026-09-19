@@ -1691,3 +1691,51 @@ Il faut encore caractériser :
     - le code retour avec pending même hostname ;
     - le code retour avec pending autre hostname ;
     - le wrapper PowerPC complet de l'export.
+
+
+## dns_abort_by_hname : sémantique observable native
+
+Une matrice native a caractérisé dns_abort_by_hname() dans plusieurs
+états du resolver.
+
+Résultats :
+
+    aucune requête correspondante
+        dns_abort_by_hname(...) -> 0
+
+    hostname déjà résolu / en cache
+        dns_abort_by_hname(...) -> 0
+
+    résolution pending du même hostname
+        getaddrinfo_async(...) -> EAI_INPROGRESS
+        dns_abort_by_hname(même hostname) -> 0
+        résolution -> rc=0 normalement
+
+    résolution pending d'un autre hostname
+        getaddrinfo_async(host A) -> EAI_INPROGRESS
+        dns_abort_by_hname(host B) -> 0
+        résolution de A -> rc=0 normalement
+
+Le premier test avec attente de 750 ms confirme également qu'une
+résolution positive devient normalement disponible après un
+dns_abort_by_hname() effectué pendant EAI_INPROGRESS.
+
+Conclusion observable :
+
+    [✓] le code retour 0 ne signifie pas qu'une requête correspondante
+        a été trouvée ;
+
+    [✓] aucun effet d'annulation n'est observable par les appels
+        getaddrinfo_async testés ;
+
+    [✓] une implémentation AX qui annulerait réellement la requête lwIP
+        serait plus agressive que le comportement natif mesuré.
+
+Parité retenue pour le shim AX :
+
+    AX actif :
+        dns_abort_by_hname(hostname) -> 0
+        aucune modification du resolver lwIP
+
+    AX inactif :
+        passthrough vers nsysnet natif
