@@ -2049,7 +2049,7 @@ Séquence finish / finish / init :
 
     socket_lib_finish() #2
         r3 = -1
-        socketlasterr = 0
+        socketlasterr = 42
 
     socket_lib_init() restauration
         r3 = 0
@@ -2058,9 +2058,9 @@ Séquence finish / finish / init :
 Le socketlasterr Nintendo réel a été vérifié en forçant le hook AX à
 déléguer au vrai export nsysnet.
 
-Le matériel diffère donc de la reconstruction Decaf sur le second
-socket_lib_finish() : aucun NoLibRm=42 n'est observable via
-socketlasterr().
+Le second socket_lib_finish() reproduit bien le comportement
+reconstruit par Decaf : r3 vaut -1 et socketlasterr() publie
+NoLibRm = 42.
 
 Décision pour le shim AX :
 
