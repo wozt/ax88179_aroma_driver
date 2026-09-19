@@ -1135,3 +1135,64 @@ Conclusion :
 
 Le transport NSSL natif direct vers Internet n'est plus nécessaire en
 mode nssl=bridge.
+
+
+## NSSL relay : fermeture propre validée
+
+Après validation initiale du transport Nintendo NSSL via localhost,
+le relay a été corrigé pour traiter comme fermeture normale les erreurs
+nsysnet correspondant à une fermeture du peer local NSSL.
+
+Le test Mario Maker / Pretendo a ensuite été répété.
+
+Connexions observées :
+
+    discovery.olv.pretendo.cc
+    s3.pretendo.cc
+
+Huit connexions NSSL ont été bridgées successivement.
+
+Pour chacune :
+
+    NSSL bridge setup result=1
+    NSSLCreateConnection result=0
+
+Le trafic TLS a été observé dans les deux directions :
+
+    NSSL -> localhost -> relay -> lwIP -> AX88179
+    AX88179 -> lwIP -> relay -> localhost -> NSSL
+
+Toutes les connexions se terminent maintenant avec :
+
+    err=0
+
+Exemple de transfert important :
+
+    AX: NSSL relay end slot=0
+        nssl_to_ax=757
+        ax_to_nssl=458684
+        err=0
+
+Résultat :
+
+    [✓] création du tunnel localhost
+    [✓] handshake NSSL à travers AX
+    [✓] trafic HTTPS applicatif à travers AX
+    [✓] fermeture normale côté NSSL
+    [✓] cleanup relay sans erreur
+
+Conclusion :
+
+Le transport Nintendo NSSL via :
+
+    IOS-NSEC
+        |
+    127.0.0.1
+        |
+    relay PPC
+        |
+    lwIP
+        |
+    AX88179
+
+est désormais fonctionnel et se ferme proprement.
