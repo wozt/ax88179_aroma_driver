@@ -2048,38 +2048,78 @@ static const struct ghba_case ghba_cases[] = {
     { "bad-family",  "8.8.8.8",     4, 0 },
 };
 
-static void dump_native_hostent(
-    const char *label,
+
+struct ghba_snapshot {
+    uintptr_t hostent_ptr;
+    uintptr_t name_ptr;
+    uintptr_t aliases_ptr;
+    uintptr_t addrlist_ptr;
+
+    int addrtype;
+    int length;
+
+    char name[256];
+    int name_terminated;
+};
+
+static void snapshot_native_hostent(
+    struct ghba_snapshot *out,
     struct hostent *h)
 {
-    if (!h) {
-        probe_say(
-            "GHBA %-12s hostent=NULL",
-            label);
+    memset(out, 0, sizeof(*out));
+
+    if (!h)
         return;
-    }
 
     /*
-     * Only read the fixed hostent fields.
+     * IMPORTANT:
      *
-     * Do NOT dereference h_aliases or h_addr_list yet. Native
-     * gethostbyaddr returned a valid name/type/length on hardware, but
-     * walking h_addr_list crashed the probe.
+     * Snapshot everything immediately. Do not log and do not call any
+     * nsysnet function before this copy is complete.
+     *
+     * Native gethostbyaddr() appears to return pointers into resolver
+     * storage whose lifetime is shorter than expected by our diagnostic
+     * logging path.
      */
-    probe_say(
-        "GHBA %-12s hostent=%08x name_ptr=%08x aliases_ptr=%08x addrlist_ptr=%08x",
-        label,
-        (unsigned)(uintptr_t)h,
-        (unsigned)(uintptr_t)h->h_name,
-        (unsigned)(uintptr_t)h->h_aliases,
-        (unsigned)(uintptr_t)h->h_addr_list);
+    out->hostent_ptr =
+        (uintptr_t)h;
 
-    probe_say(
-        "GHBA %-12s name=%s type=%d len=%d",
-        label,
-        h->h_name ? h->h_name : "(null)",
-        h->h_addrtype,
-        h->h_length);
+    out->name_ptr =
+        (uintptr_t)h->h_name;
+
+    out->aliases_ptr =
+        (uintptr_t)h->h_aliases;
+
+    out->addrlist_ptr =
+        (uintptr_t)h->h_addr_list;
+
+    out->addrtype =
+        h->h_addrtype;
+
+    out->length =
+        h->h_length;
+
+    if (h->h_name) {
+        volatile const char *src =
+            (volatile const char *)h->h_name;
+
+        for (unsigned i = 0;
+             i < sizeof(out->name) - 1;
+             i++) {
+
+            char c = src[i];
+
+            out->name[i] = c;
+
+            if (c == '\0') {
+                out->name_terminated = 1;
+                break;
+            }
+        }
+
+        out->name[
+            sizeof(out->name) - 1] = '\0';
+    }
 }
 
 static int get_native_h_errno(
@@ -2186,24 +2226,56 @@ static int gethostbyaddr_case_worker(
             c->len,
             c->type);
 
-    uint64_t elapsed =
-        OSTicksToMilliseconds(
-            OSGetTime() - begin);
+    /*
+     * CRITICAL:
+     * snapshot the returned hostent before calling anything else.
+     */
+    struct ghba_snapshot snap;
+
+    snapshot_native_hostent(
+        &snap,
+        h);
+
+    OSTime end =
+        OSGetTime();
 
     int herr_after =
         get_native_h_errno(
             getherr);
 
+    uint64_t elapsed =
+        OSTicksToMilliseconds(
+            end - begin);
+
     probe_say(
         "GHBA %-12s END result=%08x h_errno_after=%d ms=%llu",
         c->label,
-        (unsigned)(uintptr_t)h,
+        (unsigned)snap.hostent_ptr,
         herr_after,
         (unsigned long long)elapsed);
 
-    dump_native_hostent(
-        c->label,
-        h);
+    if (!snap.hostent_ptr) {
+        probe_say(
+            "GHBA %-12s hostent=NULL",
+            c->label);
+    } else {
+        probe_say(
+            "GHBA %-12s SNAP name_ptr=%08x aliases_ptr=%08x addrlist_ptr=%08x",
+            c->label,
+            (unsigned)snap.name_ptr,
+            (unsigned)snap.aliases_ptr,
+            (unsigned)snap.addrlist_ptr);
+
+        probe_say(
+            "GHBA %-12s SNAP type=%d len=%d name_term=%d name=%s",
+            c->label,
+            snap.addrtype,
+            snap.length,
+            snap.name_terminated,
+            snap.name_ptr
+                ? snap.name
+                : "(null)");
+    }
 
     probe_say(
         "GHBA %-12s WORKER DONE",
