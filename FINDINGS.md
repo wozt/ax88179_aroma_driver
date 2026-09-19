@@ -27,7 +27,7 @@
 [✓] recvfrom_ex avec vrai TTL
 [✓] sendto_multi
 [ ] parité UDP SO_RXDATA (natif = payload + 16 octets/datagramme)
-[ ] gethostbyaddr
+[✓] gethostbyaddr
 [ ] DNS async / variantes restantes
 [ ] NSSL Nintendo : détourner le transport TLS vers lwIP/AX
 [✓] hot-unplug / reconnect
@@ -1882,14 +1882,17 @@ Cas négatifs mesurés :
     family != AF_INET
         -> NULL
 
-Dans tous les cas actuellement mesurés :
+Un test contrôlé a ensuite préchargé h_errno à 1 via un véritable
+échec natif gethostbyname(), sans écrire directement dans l'état nsysnet.
 
-    h_errno avant = 0
-    h_errno après = 0
+Pour succès PTR, absence de PTR, mauvais len et mauvaise famille :
 
-Il reste à déterminer si gethostbyaddr() force h_errno à zéro ou le
-laisse simplement inchangé lorsqu'une valeur non nulle existait avant
-l'appel.
+    h_errno before = 1
+    h_errno after  = 1
+
+Conclusion :
+
+    gethostbyaddr() ne modifie pas h_errno.
 
 Note probe :
 
@@ -1945,3 +1948,74 @@ Implémentation AX :
     - hostent statique conforme au natif
     - h_aliases et h_addr_list vides
     - errno/h_errno préservés
+
+
+## gethostbyaddr AX : parité validée sur matériel
+
+Le hook AX gethostbyaddr de la version 0.2.28-gethostbyaddr a été validé
+sur Wii U réelle via RPLWRAP(gethostbyaddr), donc à travers
+FunctionPatcher et non via l'adresse brute de l'export Nintendo.
+
+Résultats positifs :
+
+    8.8.8.8
+        -> dns.google
+
+    8.8.4.4
+        -> dns.google
+
+    1.1.1.1
+        -> one.one.one.one
+
+Le cas 8.8.4.4 confirme également l'ordre correct des octets lors de la
+construction du nom reverse DNS in-addr.arpa.
+
+Hostent AX :
+
+    h_name      = PTR résolu
+    h_aliases   = pointeur vers { NULL }
+    h_addr_list = pointeur vers { NULL }
+    h_addrtype  = AF_INET (2)
+    h_length    = 4
+
+Stockage AX observé :
+
+    même hostent et mêmes buffers réutilisés entre appels
+
+Cas négatifs AX :
+
+    192.0.2.1 sans PTR
+        -> NULL
+
+    len = 3
+        -> NULL
+
+    family = 0
+        -> NULL
+
+h_errno AX :
+
+    seeded = 1
+    before = 1
+    after  = 1
+
+dans tous les cas testés.
+
+Le pointeur hostent AX :
+
+    0x80293dac
+
+diffère du pointeur natif observé :
+
+    0x102348b0
+
+ce qui confirme que le test traverse bien l'implémentation AX.
+
+Conclusion :
+
+    [✓] vrai PTR IPv4 via AX88179
+    [✓] parité hostent
+    [✓] parité cas négatifs
+    [✓] parité h_errno
+    [✓] ordre IPv4/in-addr.arpa validé
+    [✓] gethostbyaddr fermé
