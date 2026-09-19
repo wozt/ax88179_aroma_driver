@@ -22,9 +22,10 @@
 [ ] limites négatives exactes SNDBUF/RCVBUF
 [ ] comportement réel SNDBUF / backpressure
 [ ] TCP listen / accept réel
-[ ] sendto_multi_ex
-[ ] recvfrom_multi
-[ ] recvfrom_ex avec vrai TTL
+[✓] sendto_multi_ex
+[✓] recvfrom_multi
+[✓] recvfrom_ex avec vrai TTL
+[✓] sendto_multi
 [ ] gethostbyaddr
 [ ] DNS async / variantes restantes
 [ ] NSSL : état/options pendant promotion
@@ -1030,3 +1031,58 @@ For `extra_len >= 1`, the previously characterized behaviour remains:
 - output buffer is zero-filled through `extra_len`
 - with MSG_IP_RECVTTL, `extra[0]` contains the real received IPv4 TTL
 - datagram receive proceeds normally
+
+
+## recvfrom_ex AX final parity validation
+
+Final AX comparison after implementing the native `extra_len=0`
+semantics.
+
+Path:
+
+    route=ax
+    local=192.168.2.190:19030
+
+Baseline:
+
+    flags=0
+    extra_len=64
+    receive succeeds
+    extra buffer is zero-filled
+
+Zero-length metadata:
+
+    flags=0, extra_len=0
+        rc=-1
+        socketlasterr=11
+
+    flags=MSG_IP_RECVTTL, extra_len=0
+        rc=-1
+        socketlasterr=11
+
+The TTL/zero-length case was repeated three times with the same result.
+
+The output sentinel remained unchanged, and the following successful
+receive proved that the rejected calls did not consume the queued UDP
+datagram.
+
+For every tested extra_len >= 1, the actual received IPv4 TTL matched
+the PC-controlled packet TTL exactly.
+
+Observed examples:
+
+    200 -> c8
+     17 -> 11
+     37 -> 25
+     64 -> 40
+     91 -> 5b
+    127 -> 7f
+
+The connected UDP socket also reports:
+
+    getsockname = 192.168.2.190:19030
+
+Conclusion:
+
+`recvfrom_ex` now matches the characterized native nsysnet behaviour for
+the tested IPv4 UDP cases, including its zero-length metadata error path.
