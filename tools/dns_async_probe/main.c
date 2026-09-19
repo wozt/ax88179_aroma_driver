@@ -467,6 +467,248 @@ static int behavior_worker(int argc, const char **argv)
     return 0;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Async resolver polling semantics                                   */
+
+struct async_poll_result {
+    const char *label;
+    const char *node;
+
+    int initial_rc;
+    int final_rc;
+
+    int attempts;
+    uint64_t elapsed_ms;
+
+    uintptr_t res;
+
+    int nodes;
+    int first_family;
+    int first_socktype;
+    int first_protocol;
+    uint16_t first_port;
+    uint32_t first_addr;
+};
+
+static struct async_poll_result poll_results[2];
+
+static void run_one_async_poll(
+    struct async_poll_result *out,
+    const char *label,
+    const char *export_name,
+    const char *node)
+{
+    memset(out, 0, sizeof(*out));
+
+    out->label = label;
+    out->node = node;
+    out->initial_rc = 0x7fffffff;
+    out->final_rc = 0x7fffffff;
+
+    raw_getaddrinfo_fn fn =
+        (raw_getaddrinfo_fn)find_export_addr(
+            export_name);
+
+    raw_freeaddrinfo_fn native_free =
+        (raw_freeaddrinfo_fn)find_export_addr(
+            "freeaddrinfo");
+
+    if (!fn)
+        return;
+
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    struct nsn_addrinfo *res = NULL;
+
+    OSTime begin = OSGetTime();
+    OSTime deadline =
+        begin + OSMillisecondsToTicks(5000);
+
+    int rc = NSN_EAI_INPROGRESS;
+
+    while (OSGetTime() < deadline) {
+        res = NULL;
+
+        rc =
+            fn(node,
+               "80",
+               &hints,
+               &res);
+
+        out->attempts++;
+
+        if (out->attempts == 1)
+            out->initial_rc = rc;
+
+        if (rc != NSN_EAI_INPROGRESS)
+            break;
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+    }
+
+    out->final_rc = rc;
+    out->elapsed_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    out->res = (uintptr_t)res;
+
+    if (res) {
+        struct behavior_result tmp;
+        memset(&tmp, 0, sizeof(tmp));
+
+        snapshot_addrinfo(
+            &tmp,
+            res);
+
+        out->nodes = tmp.nodes;
+        out->first_family = tmp.first_family;
+        out->first_socktype = tmp.first_socktype;
+        out->first_protocol = tmp.first_protocol;
+        out->first_port = tmp.first_port;
+        out->first_addr = tmp.first_addr;
+    }
+
+    if (rc == 0 &&
+        res &&
+        native_free) {
+
+        native_free(res);
+    }
+}
+
+static int poll_worker(int argc, const char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    /*
+     * Fresh hostnames compared with the previous test so this test does
+     * not accidentally consume an entry created by the earlier native
+     * resolver calls.
+     */
+    run_one_async_poll(
+        &poll_results[0],
+        "async-poll",
+        "getaddrinfo_async",
+        "www.debian.org");
+
+    run_one_async_poll(
+        &poll_results[1],
+        "async-rs-poll",
+        "getaddrinfo_async_rs",
+        "www.kernel.org");
+
+    atomic_store(&behavior_done, 1);
+    return 0;
+}
+
+static void run_async_poll_probe(void)
+{
+    memset(
+        poll_results,
+        0,
+        sizeof(poll_results));
+
+    atomic_store(&behavior_done, 0);
+
+    probe_say("%s", "");
+    probe_say(
+        "=== ASYNC GETADDRINFO POLLING TEST ===");
+
+    BOOL created =
+        OSCreateThread(
+            &behavior_thread,
+            poll_worker,
+            0,
+            NULL,
+            behavior_stack + sizeof(behavior_stack),
+            sizeof(behavior_stack),
+            16,
+            OS_THREAD_ATTRIB_AFFINITY_ANY);
+
+    if (!created) {
+        probe_say(
+            "async poll worker OSCreateThread FAIL");
+        return;
+    }
+
+    OSSetThreadName(
+        &behavior_thread,
+        "AX DNS poll worker");
+
+    OSResumeThread(
+        &behavior_thread);
+
+    while (!atomic_load(&behavior_done)) {
+        probe_poll();
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+    }
+
+    int thread_result = -1;
+
+    OSJoinThread(
+        &behavior_thread,
+        &thread_result);
+
+    probe_say(
+        "async poll worker result=%d",
+        thread_result);
+
+    for (unsigned i = 0; i < 2; i++) {
+        struct async_poll_result *r =
+            &poll_results[i];
+
+        probe_say(
+            "POLL-GAI %-13s node=%s",
+            r->label,
+            r->node);
+
+        probe_say(
+            "  initial=%d final=%d attempts=%d elapsed=%llu ms res=%08x",
+            r->initial_rc,
+            r->final_rc,
+            r->attempts,
+            (unsigned long long)r->elapsed_ms,
+            (unsigned)r->res);
+
+        if (r->nodes > 0) {
+            char ip[32] = "?";
+
+            struct in_addr addr = {
+                .s_addr = r->first_addr
+            };
+
+            inet_ntop(
+                AF_INET,
+                &addr,
+                ip,
+                sizeof(ip));
+
+            probe_say(
+                "  nodes=%d first=%s:%u fam=%d type=%d proto=%d",
+                r->nodes,
+                ip,
+                ntohs(r->first_port),
+                r->first_family,
+                r->first_socktype,
+                r->first_protocol);
+        }
+    }
+
+    probe_say(
+        "=== END ASYNC GETADDRINFO POLLING TEST ===");
+}
+
 static void run_behavior_probe(void)
 {
     memset(
@@ -641,6 +883,8 @@ int main(void)
     probe_say("DNS ASYNC HELPER DUMP COMPLETE");
 
     run_behavior_probe();
+
+    run_async_poll_probe();
 
 wait:
     probe_say("HOME -> Quitter");
