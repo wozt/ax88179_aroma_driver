@@ -2658,3 +2658,51 @@ One separate semantic mismatch remains:
 
 That SO_RXDATA accounting difference is retained as a separate
 compatibility issue and is not part of this capacity fix.
+
+
+## AX UDP pressure after receive-pool expansion
+
+After raising:
+
+    MEMP_NUM_NETBUF=512
+    PBUF_POOL_SIZE=512
+    DEFAULT_UDP_RECVMBOX_SIZE=64
+
+the same AX UDP pressure probe no longer stopped at exactly 32 queued
+datagrams.
+
+Confirmed AX path:
+
+    SO_MYADDR=192.168.2.190
+
+Observed totals with the existing peer pacing of one group of eight
+1400-byte datagrams every 500 us:
+
+    round 1:  75 packets / 105000 bytes
+    round 2:  68 packets /  95200 bytes
+    round 3: 101 packets / 141400 bytes
+
+Recovery remained perfect after every round:
+
+    RECOVERY sockets=8/8 packets=24
+
+The previous exact 32-datagram global limit is therefore removed.
+
+However the new totals are variable rather than a stable resource
+ceiling, and packet distribution between the eight round-robin
+destinations is highly uneven.
+
+The peer's 500 us pacing corresponds nominally to:
+
+    8 * 1400 bytes / 0.0005 s
+    ~= 22.4 MB/s
+    ~= 179.2 Mbit/s payload
+
+This suggests that the current loss may occur before the enlarged UDP
+queues are filled, for example in the AX88179/USB receive path or because
+the receive worker cannot service the burst fast enough.
+
+This is not yet considered a buffer-capacity parity result.
+
+The next characterization varies sender pacing while keeping the Wii U
+probe, socket count, RCVBUF and datagram size unchanged.
