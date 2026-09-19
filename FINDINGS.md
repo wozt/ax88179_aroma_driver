@@ -980,3 +980,66 @@ La coexistence native + AX reste donc correcte sous charge prolongée.
 Conclusion :
 
     charge / concurrence : VALIDÉ
+
+
+## NSSL transport : loopback natif validé
+
+La primitive nécessaire au futur pont NSSL a été caractérisée directement
+sur la Wii U avec de vrais descripteurs nsysnet créés avant l'activation
+du shim AX.
+
+Test :
+
+    listener natif
+        |
+        +-- bind 127.0.0.1:0
+        |
+        +-- listen
+        |
+        +-- client natif -> connect 127.0.0.1
+        |
+        +-- accept
+        |
+        +-- transfert bidirectionnel 65536 octets
+
+Résultat observé :
+
+    LOOPBACK bind(127.0.0.1:0) rc=0 errno=0
+    LOOPBACK listen rc=0 errno=0
+    LOOPBACK listener=127.0.0.1:2065
+    LOOPBACK client SO_ERROR rc=0 errno=0 value=0
+
+    client:
+        local=127.0.0.1:2066
+        peer=127.0.0.1:2065
+
+    accepted:
+        local=127.0.0.1:2065
+        peer=127.0.0.1:2066
+
+    LOOPBACK CLIENT->SERVER 65536 bytes PASS
+    LOOPBACK SERVER->CLIENT 65536 bytes PASS
+
+    LOOPBACK RESULT: PASS
+
+Le shim AX s'est activé pendant le test sans casser les descripteurs natifs
+créés auparavant.
+
+Conclusion :
+
+Le nsysnet natif de la Wii U peut servir de transport local entre
+IOS-NSEC/NSSL et un relay PPC.
+
+L'architecture suivante est donc techniquement testable :
+
+    Nintendo NSSL / IOS-NSEC
+              |
+         socket natif
+              |
+          127.0.0.1
+              |
+         relay PPC
+              |
+          lwIP socket
+              |
+           AX88179
