@@ -1086,3 +1086,78 @@ Conclusion:
 
 `recvfrom_ex` now matches the characterized native nsysnet behaviour for
 the tested IPv4 UDP cases, including its zero-length metadata error path.
+
+
+## TCP server native reference validation
+
+A full TCP server/listen/accept reference test was completed on native
+nsysnet before validating the AX/lwIP implementation.
+
+Path:
+
+    route=native
+    interface=192.168.2.124
+    listener=192.168.2.124:19010
+
+Listener:
+
+    SO_TYPE=SOCK_STREAM
+    listen(backlog=2) succeeded
+
+Two TCP clients were connected before either was serviced, validating
+that the native listener can queue at least the two connections used by
+the test.
+
+Accepted sockets reported correct endpoint information:
+
+    local=192.168.2.124:19010
+    peer=192.168.2.100:<ephemeral port>
+    SO_TYPE=SOCK_STREAM
+
+Both short connections exchanged their expected messages successfully.
+
+Important observation:
+
+The order of application payloads did not correspond to the order of
+the accepted descriptors:
+
+    first accepted socket  -> CLIENT2
+    second accepted socket -> CLIENT1
+
+Therefore client identity/order must not be inferred from accept order
+when comparing native and AX behaviour. Only connection/data semantics
+should be compared.
+
+### Bulk / half-close test
+
+A third TCP connection transferred:
+
+    131072 bytes
+
+Computed FNV-1a:
+
+    received = 37309dc5
+    expected = 37309dc5
+
+The client then performed:
+
+    shutdown(SHUT_WR)
+
+Native recv() returned EOF:
+
+    eof=1
+
+The server was still able to transmit its reply after receiving EOF,
+confirming the expected TCP half-close semantics.
+
+The server then successfully performed:
+
+    shutdown(SHUT_WR) -> rc=0
+
+Final native result:
+
+    BACKLOG/SHORT CONNECTIONS: PASS
+    BULK DATA + HALF-CLOSE: PASS
+    TCP SERVER RESULT: PASS
+
+This is now the reference behaviour for the equivalent AX/lwIP test.
