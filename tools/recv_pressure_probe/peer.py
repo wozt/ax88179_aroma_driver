@@ -43,42 +43,81 @@ try:
             1
         )
 
+        # A pathological Wii U receive window must not be able to hang
+        # or terminate the complete six-case characterization.
+        conn.settimeout(20.0)
+
         print(
             f"[{test}/{TESTS}] connected {addr}",
             flush=True,
         )
 
         sent = 0
+        send_error = None
         start = time.monotonic()
 
-        while sent < TOTAL:
-            n = min(CHUNK, TOTAL - sent)
-            conn.sendall(payload[:n])
-            sent += n
+        try:
+            while sent < TOTAL:
+                want = min(CHUNK, TOTAL - sent)
+
+                n = conn.send(payload[:want])
+
+                if n <= 0:
+                    raise ConnectionError(
+                        f"send returned {n}"
+                    )
+
+                sent += n
+
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            TimeoutError,
+            socket.timeout,
+            OSError,
+        ) as exc:
+            send_error = (
+                f"{type(exc).__name__}: {exc}"
+            )
 
         elapsed = time.monotonic() - start
 
         print(
-            f"[{test}/{TESTS}] send completed "
-            f"bytes={sent} time={elapsed:.3f}s",
+            f"[{test}/{TESTS}] send result "
+            f"bytes={sent}/{TOTAL} "
+            f"time={elapsed:.3f}s "
+            f"error={send_error!r}",
             flush=True,
         )
 
-        conn.shutdown(socket.SHUT_WR)
+        try:
+            conn.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
 
-        conn.settimeout(10)
+        reply = b""
 
         try:
+            conn.settimeout(3.0)
             reply = conn.recv(128)
-        except (socket.timeout, ConnectionResetError):
-            reply = b""
+        except (
+            socket.timeout,
+            BrokenPipeError,
+            ConnectionResetError,
+            OSError,
+        ):
+            pass
 
         print(
             f"[{test}/{TESTS}] reply={reply!r}",
             flush=True,
         )
 
-        conn.close()
+        try:
+            conn.close()
+        except OSError:
+            pass
 
 finally:
     listener.close()
