@@ -7,7 +7,12 @@
 #define SYS_LIGHTWEIGHT_PROT 1
 #define MEM_ALIGNMENT 4
 #define MEM_SIZE (256 * 1024)
-#define PBUF_POOL_SIZE 48
+/*
+ * A native title may request SO_RCVBUF=65535. One full receive window
+ * consumes roughly 45 Ethernet-sized pbufs, so the old pool of 48 left
+ * effectively no headroom for ARP/DHCP/other traffic.
+ */
+#define PBUF_POOL_SIZE 96
 #define PBUF_POOL_BUFSIZE 1600
 #define LWIP_IPV4 1
 #define LWIP_IPV6 0
@@ -38,7 +43,13 @@
 #define LWIP_UDP 1
 #define LWIP_TCP 1
 #define TCP_MSS 1460
-#define TCP_WND (16 * TCP_MSS)
+/*
+ * This is now only the global upper bound. nsysnet SO_RCVBUF controls
+ * the actual per-PCB receive window through pcb->rcv_wnd_max.
+ *
+ * Native nsysnet accepts a maximum visible RCVBUF of 65535.
+ */
+#define TCP_WND 65535
 #define TCP_SND_BUF (16 * TCP_MSS)
 #define TCP_SND_QUEUELEN ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define MEMP_NUM_TCP_PCB 32
@@ -79,7 +90,12 @@
 #define TCPIP_THREAD_PRIO 1
 #define DEFAULT_THREAD_STACKSIZE (16 * 1024)
 #define DEFAULT_THREAD_PRIO 2
-#define DEFAULT_TCP_RECVMBOX_SIZE 16
+/*
+ * A 65535-byte TCP receive window needs about 45 full-size TCP pbufs.
+ * The old 16-entry mailbox independently capped application-visible
+ * queued data near 16 * 1460 = 23360 bytes.
+ */
+#define DEFAULT_TCP_RECVMBOX_SIZE 64
 #define DEFAULT_UDP_RECVMBOX_SIZE 32
 #define DEFAULT_ACCEPTMBOX_SIZE 8
 #define LWIP_SO_RCVTIMEO 1

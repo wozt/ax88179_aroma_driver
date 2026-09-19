@@ -956,11 +956,24 @@ u32_t
 tcp_update_rcv_ann_wnd(struct tcp_pcb *pcb)
 {
   u32_t new_right_edge;
+  u32_t ann_threshold;
 
   LWIP_ASSERT("tcp_update_rcv_ann_wnd: invalid pcb", pcb != NULL);
+
+  /*
+   * Stock lwIP derives this threshold from global TCP_WND.
+   * nsysnet exposes a per-socket receive window, so a tiny window must
+   * not require a TCP_MSS-sized increase before it can be advertised.
+   */
+  ann_threshold =
+    LWIP_MIN((u32_t)pcb->mss,
+             LWIP_MAX(1U,
+                      (u32_t)TCP_WND_MAX(pcb) / 2U));
+
   new_right_edge = pcb->rcv_nxt + pcb->rcv_wnd;
 
-  if (TCP_SEQ_GEQ(new_right_edge, pcb->rcv_ann_right_edge + LWIP_MIN((TCP_WND / 2), pcb->mss))) {
+  if (TCP_SEQ_GEQ(new_right_edge,
+                  pcb->rcv_ann_right_edge + ann_threshold)) {
     /* we can advertise more window */
     pcb->rcv_ann_wnd = pcb->rcv_wnd;
     return new_right_edge - pcb->rcv_ann_right_edge;
@@ -1015,13 +1028,35 @@ tcp_recved(struct tcp_pcb *pcb, u16_t len)
 
   wnd_inflation = tcp_update_rcv_ann_wnd(pcb);
 
-  /* If the change in the right edge of window is significant (default
-   * watermark is TCP_WND/4), then send an explicit update now.
-   * Otherwise wait for a packet to be sent in the normal course of
-   * events (or more window to be available later) */
-  if (wnd_inflation >= TCP_WND_UPDATE_THRESHOLD) {
-    tcp_ack_now(pcb);
-    tcp_output(pcb);
+  /*
+   * The stock threshold is based on global TCP_WND. That cannot work
+   * for a per-socket nsysnet window smaller than that threshold: a
+   * completely drained 4096-byte window, for example, could never
+   * generate the normal explicit update.
+   */
+  {
+    u32_t update_threshold =
+      LWIP_MIN((u32_t)TCP_WND_UPDATE_THRESHOLD,
+               (u32_t)TCP_WND_MAX(pcb));
+
+    if (update_threshold == 0) {
+      update_threshold = 1;
+    }
+
+    if (wnd_inflation >= update_threshold) {
+      if (TCP_WND_MAX(pcb) == 1) {
+        /*
+         * Native RCVBUF=1 makes forward progress, but only extremely
+         * slowly. Queue a delayed ACK/window update so tcp_fasttmr
+         * advertises each newly freed byte rather than sending an
+         * immediate ACK for every byte.
+         */
+        tcp_set_flags(pcb, TF_ACK_DELAY);
+      } else {
+        tcp_ack_now(pcb);
+        tcp_output(pcb);
+      }
+    }
   }
 
   LWIP_DEBUGF(TCP_DEBUG, ("tcp_recved: received %"U16_F" bytes, wnd %"TCPWNDSIZE_F" (%"TCPWNDSIZE_F").\n",
