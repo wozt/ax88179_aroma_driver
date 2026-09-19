@@ -10,12 +10,12 @@ include $(DEVKITPRO)/wut/share/wut_rules
 
 TARGET		:=	ax_shim_probe
 BUILD		:=	build
-SOURCES := . ../common
+SOURCES := . ../../common
 DATA		:=	data
 # The parent directory holds c2s_protocol.h, shared verbatim with the
 # host so the wire format cannot drift between the two. Exactly what the
 # Switch client does.
-INCLUDES := . ../common
+INCLUDES := . ../../common
 
 # These become the channel's name, icon and splash on the Wii U menu.
 # A .wuhb is an .rpx plus this metadata, and the homebrew_on_menu plugin

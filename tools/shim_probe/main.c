@@ -75,14 +75,26 @@ done:
     close(fd); return ok;
 }
 int main(void) {
+    /*
+     * Create the coexistence socket before probe_init() and, critically,
+     * before the module worker's startup guard can install the AX shim.
+     * Ownership is fixed when the socket is created, so this descriptor
+     * remains native after AX routing becomes active.
+     */
+    int native_fd = socket(AF_INET, SOCK_DGRAM, 0);
+
     if (probe_init("AX88179 socket shim: TCP / UDP") != 0) {
-        probe_shutdown(); return 1;
+        if (native_fd >= 0) close(native_fd);
+        probe_shutdown();
+        return 1;
     }
+
+    probe_say("AXPROBE early native candidate fd=%d", native_fd);
     probe_say("AXPROBE waiting 25s for DHCP; HOME / MINUS cancels");
+
     OSTime ready = OSGetTime() + OSMillisecondsToTicks(25000);
     while (pump() && OSGetTime() < ready) {}
-    /* Deliberately native: allocated before AXShimBeginProbe. */
-    int native_fd = running ? socket(AF_INET, SOCK_DGRAM, 0) : -1;
+
     OSDynLoad_Module module = 0;
     int (*begin_probe)(void) = NULL, (*end_probe)(void) = NULL;
     if (running && (OSDynLoad_Acquire("homebrew_ax88179", &module) != OS_DYNLOAD_OK ||
@@ -98,9 +110,22 @@ int main(void) {
         if (running) probe_say("AXPROBE finished TCP=%s UDP=%s", tcp ? "FAIL" : "PASS", udp ? "FAIL" : "PASS");
         int concurrent = running ? probe_concurrent(pump, native_fd) : -1;
         if (running) probe_say("AXCONCURRENT result=%s", concurrent ? "FAIL" : "PASS");
+
+        /*
+         * The coexistence socket is deliberately foreign/native, but close
+         * it before ending the diagnostic anyway so the lifecycle is
+         * unambiguous.
+         */
+        if (native_fd >= 0) {
+            close(native_fd);
+            native_fd = -1;
+        }
+
         int ended = end_probe();
-        if (running) probe_say("AXPROBE release=%d (0=no owned sockets remain)", ended);
-        else WHBLogPrintf("AXPROBE release after HOME=%d", ended);
+        if (running)
+            probe_say("AXPROBE release=%d (0=no probe-owned resources remain)", ended);
+        else
+            WHBLogPrintf("AXPROBE release after HOME=%d", ended);
     }
 finished:
     if (native_fd >= 0) close(native_fd);

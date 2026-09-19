@@ -188,6 +188,15 @@ static atomic_int mapped_fd[32];
 static atomic_int accepting_sockets;
 static atomic_uintptr_t probe_thread;
 static atomic_int probe_owns_accepting;
+
+/*
+ * Probe mode may start after production AX sockets already exist
+ * (notably the module UDP logger). Remember that baseline so EndProbe
+ * only diagnoses resources created after BeginProbe.
+ */
+static atomic_uint probe_baseline_open_mask;
+static atomic_uint probe_baseline_ai_mask;
+
 static atomic_int shim_trace_level;
 static atomic_int system_dns;
 static atomic_int force_native;
@@ -2266,30 +2275,87 @@ void nsysnet_shim_stop_accepting(void) {
 void nsysnet_shim_begin_title(void) {
     nsysnet_shim_stop_accepting();
     atomic_store(&probe_thread, 0);
+    atomic_store(&probe_baseline_open_mask, 0);
+    atomic_store(&probe_baseline_ai_mask, 0);
     atomic_store(&open_mask, 0);
     atomic_store(&ax_activity_pending, 0);
     compat_state_reset_all();
 
     for (int i=0; i<AI_OWNED_MAX; ++i) atomic_store(&ai_owned[i], NULL);
 }
+
+static uint32_t probe_ai_mask(void)
+{
+    uint32_t mask = 0;
+
+    for (int i = 0; i < AI_OWNED_MAX; ++i) {
+        if (atomic_load(&ai_owned[i]))
+            mask |= 1u << i;
+    }
+
+    return mask;
+}
+
 int nsysnet_shim_begin_probe(void) {
     if (atomic_load(&probe_thread)) return -3;
     if (!ax_net_stack_ready() || !ax_net_address()) return -4;
+
     int was_accepting = atomic_load(&accepting_sockets);
+
     if (nsysnet_shim_install() < 0) return -1;
+
+    /*
+     * Automatic production routing may already own sockets before this
+     * diagnostic probe begins. They are not probe leaks.
+     */
+    atomic_store(&probe_baseline_open_mask,
+                 atomic_load(&open_mask));
+
+    atomic_store(&probe_baseline_ai_mask,
+                 probe_ai_mask());
+
     atomic_store(&probe_thread, (uintptr_t)OSGetCurrentThread());
     atomic_store(&accepting_sockets, 1);
     atomic_store(&probe_owns_accepting, was_accepting ? 0 : 1);
+
     return 0;
 }
+
 int nsysnet_shim_end_probe(void) {
-    if (atomic_load(&probe_thread) != (uintptr_t)OSGetCurrentThread()) return -3;
-    /* The probe closes its sockets and frees its DNS results first. */
-    if (atomic_load(&open_mask)) return -5;
-    for (int i=0; i<AI_OWNED_MAX; ++i) if (atomic_load(&ai_owned[i])) return -5;
+    if (atomic_load(&probe_thread) !=
+        (uintptr_t)OSGetCurrentThread())
+        return -3;
+
+    /*
+     * Only resources added after BeginProbe count as probe leaks.
+     * Production sockets which existed before the diagnostic started
+     * are deliberately ignored.
+     */
+    uint32_t baseline_open =
+        atomic_load(&probe_baseline_open_mask);
+
+    uint32_t current_open =
+        atomic_load(&open_mask);
+
+    if (current_open & ~baseline_open)
+        return -5;
+
+    uint32_t baseline_ai =
+        atomic_load(&probe_baseline_ai_mask);
+
+    uint32_t current_ai =
+        probe_ai_mask();
+
+    if (current_ai & ~baseline_ai)
+        return -5;
+
     if (atomic_load(&probe_owns_accepting))
         nsysnet_shim_stop_accepting();
+
     atomic_store(&probe_owns_accepting, 0);
     atomic_store(&probe_thread, 0);
+    atomic_store(&probe_baseline_open_mask, 0);
+    atomic_store(&probe_baseline_ai_mask, 0);
+
     return 0;
 }

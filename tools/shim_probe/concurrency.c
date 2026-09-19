@@ -107,6 +107,34 @@ int probe_concurrent(int (*pump)(void), int native_fd) {
     /* Native socket created before enrollment: mixed select must preserve
      * its real routing while also selecting the shim TCP descriptor. */
     if (native_fd<0 || connect_fd(native_fd,pump)) goto done;
+
+    /*
+     * Prove that this really is the native side of the mixed test.
+     * With the current lab network this should report the Wii U system
+     * interface (192.168.2.124), while shim sockets report AX .190.
+     */
+    {
+        struct sockaddr_in local;
+        socklen_t local_len = sizeof(local);
+        char ip[32] = "?";
+
+        memset(&local, 0, sizeof(local));
+
+        if (getsockname(native_fd,
+                        (struct sockaddr *)&local,
+                        &local_len) == 0) {
+            inet_ntop(AF_INET,
+                      &local.sin_addr,
+                      ip,
+                      sizeof(ip));
+        }
+
+        probe_say(
+            "AXCONCURRENT coexist socket local=%s:%u",
+            ip,
+            ntohs(local.sin_port));
+    }
+
     const char marker[]="AX-native-coexistence";
     if (send(native_fd,marker,sizeof(marker),0)!=(int)sizeof(marker)) goto done;
     int native_ok=0;
