@@ -2149,6 +2149,21 @@ ghba_stacks[GHBA_CASE_COUNT][BEHAVIOR_STACK_SIZE]
 
 static atomic_int ghba_done;
 
+
+struct ghba_result {
+    int worker_rc;
+
+    int herr_before;
+    int herr_after;
+
+    uint64_t elapsed_ms;
+
+    struct ghba_snapshot snap;
+};
+
+static struct ghba_result
+ghba_results[GHBA_CASE_COUNT];
+
 static int gethostbyaddr_case_worker(
     int argc,
     const char **argv)
@@ -2165,6 +2180,11 @@ static int gethostbyaddr_case_worker(
     const struct ghba_case *c =
         &ghba_cases[index];
 
+    struct ghba_result *r =
+        &ghba_results[index];
+
+    memset(r, 0, sizeof(*r));
+
     raw_gethostbyaddr_fn ghba =
         (raw_gethostbyaddr_fn)find_export_addr(
             "gethostbyaddr");
@@ -2174,10 +2194,7 @@ static int gethostbyaddr_case_worker(
             "get_h_errno");
 
     if (!ghba || !getherr) {
-        probe_say(
-            "GHBA %-12s missing native export",
-            c->label);
-
+        r->worker_rc = -1;
         atomic_store(&ghba_done, 1);
         return -1;
     }
@@ -2189,10 +2206,7 @@ static int gethostbyaddr_case_worker(
             c->ip,
             &addr) != 1) {
 
-        probe_say(
-            "GHBA %-12s inet_pton FAIL",
-            c->label);
-
+        r->worker_rc = -2;
         atomic_store(&ghba_done, 1);
         return -2;
     }
@@ -2200,22 +2214,14 @@ static int gethostbyaddr_case_worker(
     /*
      * IMPORTANT:
      *
-     * Do not write into native nsysnet h_errno.
-     * The WUT wrapper only reads this value after the call.
+     * Absolutely no probe_say(), UI or logging from this worker.
      *
-     * Record before/after instead, without perturbing resolver state.
+     * probe_say() updates the on-screen UI and is not safe from a
+     * secondary thread.
      */
-    int herr_before =
+    r->herr_before =
         get_native_h_errno(
             getherr);
-
-    probe_say(
-        "GHBA %-12s BEGIN ip=%s len=%u type=%d h_errno_before=%d",
-        c->label,
-        c->ip,
-        (unsigned)c->len,
-        c->type,
-        herr_before);
 
     OSTime begin =
         OSGetTime();
@@ -2227,89 +2233,24 @@ static int gethostbyaddr_case_worker(
             c->type);
 
     /*
-     * CRITICAL:
-     * snapshot the returned hostent before calling anything else.
+     * Snapshot immediately before any other nsysnet call.
      */
-    struct ghba_snapshot snap;
-
     snapshot_native_hostent(
-        &snap,
+        &r->snap,
         h);
 
     OSTime end =
         OSGetTime();
 
-    int herr_after =
+    r->herr_after =
         get_native_h_errno(
             getherr);
 
-    uint64_t elapsed =
+    r->elapsed_ms =
         OSTicksToMilliseconds(
             end - begin);
 
-    probe_say(
-        "GHBA %-12s END result=%08x h_errno_after=%d ms=%llu",
-        c->label,
-        (unsigned)snap.hostent_ptr,
-        herr_after,
-        (unsigned long long)elapsed);
-
-    if (!snap.hostent_ptr) {
-        probe_say(
-            "GHBA %-12s hostent=NULL",
-            c->label);
-    } else {
-        probe_say(
-            "GHBA %-12s SNAP name_ptr=%08x aliases_ptr=%08x addrlist_ptr=%08x",
-            c->label,
-            (unsigned)snap.name_ptr,
-            (unsigned)snap.aliases_ptr,
-            (unsigned)snap.addrlist_ptr);
-
-        probe_say(
-            "GHBA %-12s SNAP type=%d len=%d name_term=%d",
-            c->label,
-            snap.addrtype,
-            snap.length,
-            snap.name_terminated);
-
-        /*
-         * Avoid %s entirely here.
-         *
-         * The snapshot itself completes successfully, but passing the
-         * copied resolver name through probe_say("%s") crashes on real
-         * hardware. Dump the first bytes as integers instead.
-         */
-        if (snap.name_ptr) {
-            probe_say(
-                "GHBA %-12s NAMEHEX %02x %02x %02x %02x %02x %02x %02x %02x",
-                c->label,
-                (unsigned)(uint8_t)snap.name[0],
-                (unsigned)(uint8_t)snap.name[1],
-                (unsigned)(uint8_t)snap.name[2],
-                (unsigned)(uint8_t)snap.name[3],
-                (unsigned)(uint8_t)snap.name[4],
-                (unsigned)(uint8_t)snap.name[5],
-                (unsigned)(uint8_t)snap.name[6],
-                (unsigned)(uint8_t)snap.name[7]);
-
-            probe_say(
-                "GHBA %-12s NAMEHEX %02x %02x %02x %02x %02x %02x %02x %02x",
-                c->label,
-                (unsigned)(uint8_t)snap.name[8],
-                (unsigned)(uint8_t)snap.name[9],
-                (unsigned)(uint8_t)snap.name[10],
-                (unsigned)(uint8_t)snap.name[11],
-                (unsigned)(uint8_t)snap.name[12],
-                (unsigned)(uint8_t)snap.name[13],
-                (unsigned)(uint8_t)snap.name[14],
-                (unsigned)(uint8_t)snap.name[15]);
-        }
-    }
-
-    probe_say(
-        "GHBA %-12s WORKER DONE",
-        c->label);
+    r->worker_rc = 0;
 
     atomic_store(
         &ghba_done,
@@ -2317,6 +2258,7 @@ static int gethostbyaddr_case_worker(
 
     return 0;
 }
+
 
 static void run_gethostbyaddr_probe(void)
 {
@@ -2331,11 +2273,16 @@ static void run_gethostbyaddr_probe(void)
         const struct ghba_case *c =
             &ghba_cases[i];
 
+        struct ghba_result *r =
+            &ghba_results[i];
+
         probe_say(
             "GHBA CASE %u/%u label=%s",
             i + 1,
             (unsigned)GHBA_CASE_COUNT,
             c->label);
+
+        memset(r, 0, sizeof(*r));
 
         atomic_store(
             &ghba_done,
@@ -2371,11 +2318,8 @@ static void run_gethostbyaddr_probe(void)
         while (!atomic_load(
                    &ghba_done)) {
 
-            if (!probe_poll()) {
-                probe_say(
-                    "GHBA ProcUI requested exit");
+            if (!probe_poll())
                 return;
-            }
 
             OSSleepTicks(
                 OSMillisecondsToTicks(10));
@@ -2387,13 +2331,85 @@ static void run_gethostbyaddr_probe(void)
             &ghba_threads[i],
             &thread_result);
 
+        /*
+         * Everything below runs on the main/UI thread.
+         */
         probe_say(
-            "GHBA %-12s JOIN result=%d",
+            "GHBA %-12s JOIN thread=%d worker=%d",
             c->label,
-            thread_result);
+            thread_result,
+            r->worker_rc);
+
+        if (r->worker_rc != 0) {
+            probe_say(
+                "GHBA %-12s worker failure=%d",
+                c->label,
+                r->worker_rc);
+
+            continue;
+        }
+
+        probe_say(
+            "GHBA %-12s ip=%s len=%u type=%d result=%08x h_before=%d h_after=%d ms=%llu",
+            c->label,
+            c->ip,
+            (unsigned)c->len,
+            c->type,
+            (unsigned)r->snap.hostent_ptr,
+            r->herr_before,
+            r->herr_after,
+            (unsigned long long)r->elapsed_ms);
+
+        if (!r->snap.hostent_ptr) {
+            probe_say(
+                "GHBA %-12s hostent=NULL",
+                c->label);
+        } else {
+            probe_say(
+                "GHBA %-12s SNAP type=%d len=%d term=%d",
+                c->label,
+                r->snap.addrtype,
+                r->snap.length,
+                r->snap.name_terminated);
+
+            probe_say(
+                "GHBA %-12s PTR name=%08x aliases=%08x addrlist=%08x",
+                c->label,
+                (unsigned)r->snap.name_ptr,
+                (unsigned)r->snap.aliases_ptr,
+                (unsigned)r->snap.addrlist_ptr);
+
+            /*
+             * No %s needed yet. These bytes are from our own global
+             * snapshot and are safe to print as integers.
+             */
+            probe_say(
+                "GHBA %-12s NAMEHEX %02x %02x %02x %02x %02x %02x %02x %02x",
+                c->label,
+                (unsigned)(uint8_t)r->snap.name[0],
+                (unsigned)(uint8_t)r->snap.name[1],
+                (unsigned)(uint8_t)r->snap.name[2],
+                (unsigned)(uint8_t)r->snap.name[3],
+                (unsigned)(uint8_t)r->snap.name[4],
+                (unsigned)(uint8_t)r->snap.name[5],
+                (unsigned)(uint8_t)r->snap.name[6],
+                (unsigned)(uint8_t)r->snap.name[7]);
+
+            probe_say(
+                "GHBA %-12s NAMEHEX %02x %02x %02x %02x %02x %02x %02x %02x",
+                c->label,
+                (unsigned)(uint8_t)r->snap.name[8],
+                (unsigned)(uint8_t)r->snap.name[9],
+                (unsigned)(uint8_t)r->snap.name[10],
+                (unsigned)(uint8_t)r->snap.name[11],
+                (unsigned)(uint8_t)r->snap.name[12],
+                (unsigned)(uint8_t)r->snap.name[13],
+                (unsigned)(uint8_t)r->snap.name[14],
+                (unsigned)(uint8_t)r->snap.name[15]);
+        }
 
         /*
-         * Keep cases well separated in time.
+         * Let ProcUI/UI breathe between native resolver cases.
          */
         for (int n = 0; n < 5; n++) {
             if (!probe_poll())
