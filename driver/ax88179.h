@@ -62,6 +62,17 @@ int ax88179_send(Ax88179 *ax, const void *frame, int length);
 /* UHS timeout in microseconds, inferred from console timing measurements. */
 int ax88179_receive(Ax88179 *ax, void *frame, int max_length, int timeout_us);
 
+/*
+ * Return the next ethernet frame already buffered inside the most recent
+ * AX88179 bulk transfer.
+ *
+ * This never submits a new USB request. It returns:
+ *   >0 frame length
+ *    0 no buffered frame remains
+ *   -1 malformed buffered data
+ */
+int ax88179_receive_buffered(Ax88179 *ax, void *frame, int max_length);
+
 /* What the last bulk request returned, and which endpoints were
  * chosen. Both exist because the first version swallowed its errors and
  * "no frames" could have meant any of five things. */

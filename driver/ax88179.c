@@ -538,102 +538,189 @@ int ax88179_send(Ax88179 *ax, const void *frame, int length)
     return r == transfer_length ? 0 : -1;
 }
 
-int ax88179_receive(Ax88179 *ax, void *frame, int max_length, int timeout_us)
+static int
+ax88179_receive_buffered_impl(Ax88179 *ax, void *frame, int max_length)
 {
-    if (!ax || !frame || max_length < 14 || timeout_us < 0) {
+    if (!ax || !frame || max_length < 14) {
         return -1;
     }
-    if (!ax->medium) return 0;
-    int submitted = 0;
 
-    /*
-     * The chip's receive wrapper, which is the thing to get right.
-     *
-     * A bulk transfer carries several frames and the metadata is at the
-     * END of it, not the front:
-     *
-     *     <frame 1><pad to 8>  ...  <frame N><pad to 8>
-     *     <descriptor 1><dummy>  ...  <descriptor N><dummy>
-     *     <pad><trailer>
-     *
-     * The last four bytes give the descriptor count and where the
-     * descriptors start. Each descriptor's bits 16..28 are that frame's
-     * length, and each frame begins with TWO bytes of alignment padding
-     * before the ethernet header. Descriptors come in pairs -- one real,
-     * one dummy with length zero -- so a zero length is skipped rather
-     * than treated as the end.
-     *
-     * Reading any of that from the front instead produces plausible
-     * lengths and silently corrupted packets, which is precisely the
-     * fault the AX88772B patcher had to fix on the other chip. Hence
-     * the care, and hence the bounds checks: a malformed descriptor
-     * must not walk off the buffer.
-     */
-    for (;;) {
-        if (ax->rx_next >= ax->rx_frames) {
-            if (submitted) return 0;
-            submitted = 1;
-            DCFlushRange(g_rx, sizeof(g_rx));
-            const OSTime t0 = OSGetTime();
-            const int32_t got = UhsSubmitBulkRequest(&ax->handle, ax->if_handle, ax->ep_in,
-                                                     UHS_DIR_IN, g_rx, sizeof(g_rx), timeout_us);
-            ax->last_bulk_us = (uint32_t)OSTicksToMicroseconds(OSGetTime() - t0);
-            ax->last_bulk = got;
-            /* Idle/no-data status observed on this console. Raw status and
-             * duration remain available; other negative codes are errors.
-             * Measurements for arguments 100/1000/5000 are consistent with
-             * microseconds plus IPC overhead, not milliseconds. */
-            if (got == AX_UHS_NO_DATA) return 0;
-            if (got < 0) return -1;
-            if (got == 0) return 0;
-            if (got < 4 || got > (int32_t)sizeof(g_rx)) return -1;
-            DCInvalidateRange(g_rx, sizeof(g_rx));
-            ax->rx_len = (int)got;
+    while (ax->rx_next < ax->rx_frames) {
+        const uint8_t *desc =
+            g_rx + ax->rx_hdr_offset + 4 * ax->rx_next;
 
-            const uint8_t *trailer = g_rx + ax->rx_len - 4;
-            const uint32_t rx_hdr = le32(trailer);
-            ax->rx_frames = (int)(rx_hdr & 0xFFFF);
-            ax->rx_hdr_offset = (rx_hdr >> 16) & 0xFFFF;
-            ax->rx_next = 0;
-            ax->rx_pos = 0;
-
-            if (ax->rx_frames == 0) return 0;
-            if (ax->rx_hdr_offset + 4u * (uint32_t)ax->rx_frames > (uint32_t)ax->rx_len - 4u) {
-                ax->rx_frames = 0;
-                return -1;
-            }
-        }
-
-        const uint8_t *desc = g_rx + ax->rx_hdr_offset + 4 * ax->rx_next;
         const uint32_t d = le32(desc);
         ax->rx_next++;
 
-        const int length = (int)((d >> 16) & 0x1FFF);
+        const int length =
+            (int)((d >> 16) & 0x1FFF);
+
+        /*
+         * AX88179 bulk metadata contains dummy descriptors with
+         * zero length. They consume a descriptor slot but no frame data.
+         */
         if (length == 0) {
-            continue;   /* the dummy descriptor of the pair */
-        }
-        const int padded = (length + 7) & ~7;
-
-        if (ax->rx_pos + padded > (int)ax->rx_hdr_offset) {
-            ax->rx_frames = 0;   /* it would overlap the descriptors */
-            return -1;
-        }
-        const uint8_t *packet = g_rx + ax->rx_pos + 2;   /* 2 bytes of alignment */
-        /* This configuration delivers the on-wire FCS after the frame.
-         * Confirmed against host CRC32 for 60/504/1514-byte wire probes. */
-        const int packet_len = length - 2 - 4;
-        ax->rx_pos += padded;
-
-        /* Bad CRC, or too short to be an ethernet frame at all. */
-        if ((d & (AX_RXHDR_CRC_ERR | AX_RXHDR_DROP_ERR)) || packet_len < 14) {
             continue;
         }
+
+        const int padded =
+            (length + 7) & ~7;
+
+        if (ax->rx_pos + padded >
+            (int)ax->rx_hdr_offset) {
+            ax->rx_frames = 0;
+            return -1;
+        }
+
+        const uint8_t *packet =
+            g_rx + ax->rx_pos + 2;
+
+        /*
+         * Two bytes of AX alignment precede the ethernet header and the
+         * hardware delivers the four-byte FCS after the ethernet frame.
+         */
+        const int packet_len =
+            length - 2 - 4;
+
+        ax->rx_pos += padded;
+
+        if ((d & (AX_RXHDR_CRC_ERR |
+                  AX_RXHDR_DROP_ERR)) ||
+            packet_len < 14) {
+            continue;
+        }
+
         if (packet_len > max_length) {
             continue;
         }
-        memcpy(frame, packet, (size_t)packet_len);
+
+        memcpy(frame,
+               packet,
+               (size_t)packet_len);
+
         return packet_len;
     }
+
+    return 0;
+}
+
+int
+ax88179_receive_buffered(
+    Ax88179 *ax,
+    void *frame,
+    int max_length)
+{
+    return ax88179_receive_buffered_impl(
+        ax,
+        frame,
+        max_length);
+}
+
+int
+ax88179_receive(
+    Ax88179 *ax,
+    void *frame,
+    int max_length,
+    int timeout_us)
+{
+    if (!ax || !frame ||
+        max_length < 14 ||
+        timeout_us < 0) {
+        return -1;
+    }
+
+    if (!ax->medium) {
+        return 0;
+    }
+
+    /*
+     * Always consume anything remaining from the previous USB aggregate
+     * before asking UHS for another bulk transfer.
+     */
+    int n =
+        ax88179_receive_buffered_impl(
+            ax,
+            frame,
+            max_length);
+
+    if (n != 0) {
+        return n;
+    }
+
+    DCFlushRange(g_rx, sizeof(g_rx));
+
+    const OSTime t0 =
+        OSGetTime();
+
+    const int32_t got =
+        UhsSubmitBulkRequest(
+            &ax->handle,
+            ax->if_handle,
+            ax->ep_in,
+            UHS_DIR_IN,
+            g_rx,
+            sizeof(g_rx),
+            timeout_us);
+
+    ax->last_bulk_us =
+        (uint32_t)OSTicksToMicroseconds(
+            OSGetTime() - t0);
+
+    ax->last_bulk = got;
+
+    if (got == AX_UHS_NO_DATA) {
+        return 0;
+    }
+
+    if (got < 0) {
+        return -1;
+    }
+
+    if (got == 0) {
+        return 0;
+    }
+
+    if (got < 4 ||
+        got > (int32_t)sizeof(g_rx)) {
+        return -1;
+    }
+
+    DCInvalidateRange(
+        g_rx,
+        sizeof(g_rx));
+
+    ax->rx_len = (int)got;
+
+    const uint8_t *trailer =
+        g_rx + ax->rx_len - 4;
+
+    const uint32_t rx_hdr =
+        le32(trailer);
+
+    ax->rx_frames =
+        (int)(rx_hdr & 0xFFFF);
+
+    ax->rx_hdr_offset =
+        (rx_hdr >> 16) & 0xFFFF;
+
+    ax->rx_next = 0;
+    ax->rx_pos = 0;
+
+    if (ax->rx_frames == 0) {
+        return 0;
+    }
+
+    if (ax->rx_hdr_offset +
+            4u * (uint32_t)ax->rx_frames >
+        (uint32_t)ax->rx_len - 4u) {
+        ax->rx_frames = 0;
+        return -1;
+    }
+
+    return ax88179_receive_buffered_impl(
+        ax,
+        frame,
+        max_length);
 }
 
 int32_t ax88179_last_bulk(const Ax88179 *ax)

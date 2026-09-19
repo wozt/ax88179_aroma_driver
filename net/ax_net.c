@@ -212,6 +212,34 @@ static void set_link(int up)
     UNLOCK_TCPIP_CORE();
 }
 
+static void input_rx_frame(int n)
+{
+    stat_rx_ok++;
+
+    struct pbuf *p =
+        pbuf_alloc(
+            PBUF_RAW,
+            (u16_t)n,
+            PBUF_POOL);
+
+    if (!p) {
+        stat_in_drop++;
+        return;
+    }
+
+    if (pbuf_take(
+            p,
+            rx_frame,
+            (u16_t)n) != ERR_OK ||
+        iface.input(p, &iface) != ERR_OK) {
+        stat_in_drop++;
+        pbuf_free(p);
+        return;
+    }
+
+    stat_in_ok++;
+}
+
 static void drain_tx(Ax88179 *ax, int send)
 {
     OSMessage m;
@@ -258,22 +286,51 @@ int ax_net_poll(void)
      * idle CPU. Five milliseconds is the compromise; a transmit-heavy
      * load wants the sending moved off this thread entirely.
      */
-    int n = ax88179_receive(iface.state, rx_frame, sizeof(rx_frame), 5000);
-    if (n > 0) stat_rx_ok++;
-    else if (n < 0) stat_rx_err++;
-    else stat_rx_idle++;
+    int n =
+        ax88179_receive(
+            iface.state,
+            rx_frame,
+            sizeof(rx_frame),
+            5000);
+
     if (n > 0) {
-        struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)n, PBUF_POOL);
-        if (p) {
-            if (pbuf_take(p, rx_frame, (u16_t)n) != ERR_OK || iface.input(p, &iface) != ERR_OK) {
-                stat_in_drop++;
-                pbuf_free(p);
-            } else {
-                stat_in_ok++;
+        input_rx_frame(n);
+
+        /*
+         * One AX88179 USB bulk can contain many ethernet frames.
+         *
+         * Previously ax_net_poll() returned after the first one, forcing
+         * every remaining frame through another complete module-worker
+         * iteration. Under ~147 Mbit/s UDP bursts that was slow enough
+         * for the device/input path to overflow before socket queues were
+         * full.
+         *
+         * Drain the complete already-fetched aggregate now. This function
+         * performs no new USB request, so this loop is bounded by the
+         * current 26 KiB bulk buffer.
+         */
+        for (;;) {
+            int more =
+                ax88179_receive_buffered(
+                    iface.state,
+                    rx_frame,
+                    sizeof(rx_frame));
+
+            if (more > 0) {
+                input_rx_frame(more);
+                continue;
             }
-        } else {
-            stat_in_drop++;
+
+            if (more < 0) {
+                stat_rx_err++;
+            }
+
+            break;
         }
+    } else if (n < 0) {
+        stat_rx_err++;
+    } else {
+        stat_rx_idle++;
     }
     /* CORE_LOCKING_INPUT makes input synchronous: generated replies are
      * now queued. Drain after every receive, also when a timer/socket
