@@ -95,7 +95,16 @@
 #define LWIP_TCPIP_CORE_LOCKING_INPUT 0
 #define TCPIP_MBOX_SIZE 512
 #define TCPIP_THREAD_STACKSIZE (32 * 1024)
-#define TCPIP_THREAD_PRIO 1
+/*
+ * Coreinit uses 0 as highest priority.
+ *
+ * sys_thread_new maps lwIP priority N to Coreinit 4+N.
+ * Keep the tcpip consumer just below the AX/UHS worker (priority 16),
+ * so USB RX can stay serviced while the tcpip mailbox contains a burst.
+ *
+ * 4 + 13 = Coreinit priority 17.
+ */
+#define TCPIP_THREAD_PRIO 13
 #define DEFAULT_THREAD_STACKSIZE (16 * 1024)
 #define DEFAULT_THREAD_PRIO 2
 /*
