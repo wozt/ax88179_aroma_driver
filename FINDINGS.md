@@ -1043,3 +1043,95 @@ L'architecture suivante est donc techniquement testable :
           lwIP socket
               |
            AX88179
+
+
+## NSSL Nintendo transporté via lwIP / AX88179
+
+Le premier pont réel entre Nintendo NSSL et le réseau AX88179 a été
+validé.
+
+Architecture testée :
+
+    jeu
+      |
+      v
+    Nintendo NSSL / IOS-NSEC
+      |
+      | TLS Nintendo
+      v
+    socket nsysnet natif
+      |
+      v
+    127.0.0.1
+      |
+      v
+    relay PPC
+      |
+      v
+    socket lwIP déjà connectée
+      |
+      v
+    AX88179
+      |
+      v
+    Internet / Pretendo
+
+Le hostname original est conservé dans NSSLCreateConnection().
+Seul le transport sous TLS est remplacé.
+
+Connexions observées :
+
+    discovery.olv.pretendo.cc
+    s3.pretendo.cc
+
+Exemple :
+
+    AX: NSSL bridge ready fd=6 lwfd=2 loopback_port=4599
+    AX: NSSL bridge setup fd=6 result=1 host=discovery.olv.pretendo.cc
+    AX: NSSLCreateConnection fd=6 result=0 mode=bridge
+
+Le relay observe ensuite du trafic dans les deux directions :
+
+    AX: NSSL relay first NSSL->AX bytes=208
+    AX: NSSL relay first AX->NSSL bytes=4096
+
+Une connexion vers s3.pretendo.cc a transféré :
+
+    NSSL -> AX : 757 octets
+    AX -> NSSL : 458715 octets
+
+Sur l'ensemble du log fourni :
+
+    8 connexions NSSL bridgées
+    environ 6323 octets NSSL -> AX
+    environ 765797 octets AX -> NSSL
+
+Le volume reçu dépasse très largement un simple handshake TLS :
+du trafic HTTPS applicatif est donc effectivement transporté par
+lwIP/AX88179.
+
+Deux connexions se sont terminées avec :
+
+    err=3013
+
+Le relay encode cette valeur comme :
+
+    3000 + socketlasterr()
+
+donc :
+
+    socketlasterr = 13 = EPIPE
+
+Cela correspond à une fermeture du côté NSSL alors que le relay avait
+encore des données à pousser. Les autres connexions se terminent avec
+err=0.
+
+Conclusion :
+
+    [✓] Nintendo NSSL fonctionne au-dessus d'un tunnel localhost
+    [✓] les octets TLS sortent via lwIP
+    [✓] les réponses Internet reviennent via AX88179
+    [✓] aucun remplacement de l'implémentation TLS Nintendo nécessaire
+
+Le transport NSSL natif direct vers Internet n'est plus nécessaire en
+mode nssl=bridge.
