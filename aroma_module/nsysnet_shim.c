@@ -23,8 +23,11 @@
  * A title that asks for a socket before the adapter is up gets a real
  * console socket, so the worst case is the Wi-Fi behaviour we had before.
  *
- * Not covered (only usable with native sockets, not shim sockets):
- * netconf_*, socket_lib_init/finish. NSSL itself still
+ * netconf_* is not covered yet.
+ *
+ * socket_lib_init/finish deliberately remain native: the shim still
+ * requires nsysnet /dev/socket for reserved public descriptors and the
+ * NSSL localhost bridge. NSSL itself still
  * requires a system fd; NSSLCreateConnection is bridged by promoting an
  * AX-backed socket to its reserved native placeholder at the TLS boundary.
  */

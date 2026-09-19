@@ -2019,3 +2019,57 @@ Conclusion :
     [✓] parité h_errno
     [✓] ordre IPv4/in-addr.arpa validé
     [✓] gethostbyaddr fermé
+
+
+## socket_lib_init / socket_lib_finish natifs
+
+Les exports nsysnet socket_lib_init() et socket_lib_finish() ont été
+caractérisés sur matériel réel.
+
+WUT les expose publiquement comme des fonctions void. La valeur laissée
+dans r3 a néanmoins été enregistrée comme observation interne.
+
+État déjà initialisé :
+
+    socket_lib_init()
+        r3 = 0
+        socketlasterr = 0
+        durée = 0 ms
+
+Un second socket_lib_init() est également idempotent :
+
+    r3 = 0
+    socketlasterr = 0
+
+Séquence finish / finish / init :
+
+    socket_lib_finish() #1
+        r3 = 0
+        socketlasterr = 0
+
+    socket_lib_finish() #2
+        r3 = -1
+        socketlasterr = 0
+
+    socket_lib_init() restauration
+        r3 = 0
+        socketlasterr = 0
+
+Le socketlasterr Nintendo réel a été vérifié en forçant le hook AX à
+déléguer au vrai export nsysnet.
+
+Le matériel diffère donc de la reconstruction Decaf sur le second
+socket_lib_finish() : aucun NoLibRm=42 n'est observable via
+socketlasterr().
+
+Décision pour le shim AX :
+
+    [✓] ne pas patcher socket_lib_init
+    [✓] ne pas patcher socket_lib_finish
+    [✓] conserver /dev/socket natif disponible
+
+Cette décision est nécessaire notamment pour :
+
+    - les placeholders de fd nsysnet
+    - le bridge NSSL
+    - le relay localhost natif
