@@ -103,13 +103,22 @@ static unsigned drain_socket(
     int fd,
     unsigned *bytes)
 {
-    uint8_t buf[2048];
+    /*
+     * Native nsysnet receive APIs have already shown alignment-sensitive
+     * ABIs in the multi/recvfrom_ex characterization. Keep both output
+     * buffers on 0x40 boundaries while testing ordinary recvfrom().
+     */
+    static uint8_t buf[2048]
+        __attribute__((aligned(0x40)));
+
+    static struct sockaddr_in from
+        __attribute__((aligned(0x40)));
+
     unsigned packets = 0;
 
     *bytes = 0;
 
     for (;;) {
-        struct sockaddr_in from;
         socklen_t from_len = sizeof(from);
 
         memset(&from, 0, sizeof(from));
@@ -181,6 +190,8 @@ int main(void)
 
     probe_say(
         "UDP global receive-buffer exhaustion + recovery");
+    probe_say(
+        "HARNESS recvfrom-aligned-v1");
 
     wait_ms(8000);
 
