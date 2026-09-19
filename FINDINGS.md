@@ -1308,3 +1308,76 @@ set_resolver_allocator vérifie r3 et r4 et stocke deux pointeurs,
 ce qui confirme son ABI à deux arguments.
 
 Aucun appel expérimental n'a été effectué pendant ce test.
+
+
+## DNS async : helper commun et ABI 4 arguments
+
+Le second audit passif a dumpé 128 instructions du helper commun
+getaddrinfo situé à :
+
+    0x010c4900
+
+Les quatre wrappers publics passent par ce helper.
+
+Le prologue montre explicitement :
+
+    r3 -> r27 = node
+    r4 -> r28 = service
+    r6 -> r29 = res
+    r7 -> r30 = mode sync/async
+    r8 -> r31 = workspace interne
+
+Le pointeur hints reste en r5 et ses champs sont lus directement :
+
+    +0x00 flags
+    +0x04 family
+    +0x08 socktype
+    +0x0c protocol
+
+Les wrappers injectent eux-mêmes :
+
+    getaddrinfo          : r7 = 0
+    getaddrinfo_async    : r7 = 1
+    getaddrinfo_rs       : r7 = 0
+    getaddrinfo_async_rs : r7 = 1
+
+et :
+
+    r8 = stack + 8
+
+Les arguments publics r3-r6 sont laissés inchangés.
+
+Le helper ne sauvegarde pas r9/r10 comme arguments publics et commence
+rapidement à les réutiliser comme registres temporaires.
+
+Conclusion ABI :
+
+    int getaddrinfo(
+        const char *node,
+        const char *service,
+        const struct addrinfo *hints,
+        struct addrinfo **res);
+
+    int getaddrinfo_async(
+        const char *node,
+        const char *service,
+        const struct addrinfo *hints,
+        struct addrinfo **res);
+
+    int getaddrinfo_rs(
+        const char *node,
+        const char *service,
+        const struct addrinfo *hints,
+        struct addrinfo **res);
+
+    int getaddrinfo_async_rs(
+        const char *node,
+        const char *service,
+        const struct addrinfo *hints,
+        struct addrinfo **res);
+
+La différence async est interne au resolver et est commandée par r7.
+
+Il reste à caractériser le comportement observable : code retour,
+blocage éventuel, résultat immédiat/différé et comportement des variantes
+_rs.
