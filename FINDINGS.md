@@ -29,7 +29,7 @@
 [ ] parité UDP SO_RXDATA (natif = payload + 16 octets/datagramme)
 [ ] gethostbyaddr
 [ ] DNS async / variantes restantes
-[ ] NSSL : état/options pendant promotion
+[ ] NSSL Nintendo : détourner le transport TLS vers lwIP/AX
 [ ] hot-unplug / reconnect
 [ ] perte/restauration link
 [ ] DHCP renew/recovery
@@ -111,6 +111,28 @@ Lors d'un `NSSLCreateConnection()` sur une socket AX :
 5. NSSL reçoit la socket native connectée.
 
 Le trafic TLS/NSSL est donc actuellement promu vers le réseau natif.
+
+Cette promotion est une solution provisoire.
+
+Architecture finale visée :
+
+    jeu
+     |
+     +------ trafic normal ------> nsysnet shim -> lwIP
+     |
+     +------ NSSL Nintendo ------> TLS Nintendo
+                                      |
+                                pont transport
+                                      |
+                                      v
+                                    lwIP
+                                      |
+                                      v
+                                   AX88179
+
+L'objectif est donc de conserver l'implémentation NSSL/TLS Nintendo et
+de détourner uniquement son transport vers lwIP, si le reverse
+engineering permet de le faire proprement.
 
 #### SO_TCPSACK
 
@@ -675,3 +697,56 @@ python3 tools/buffer_exhaustion_probe/peer.py
 Current expected AX path :
 
     192.168.2.190
+
+
+## Hot-unplug USB - comportement avant recovery
+
+Test effectué avec l'AX88179 actif sur :
+
+    192.168.2.190
+
+Avant débranchement, le ping fonctionnait normalement.
+
+Après arrachement physique du dongle USB, les réponses ont cessé et le
+PC a fini par retourner :
+
+    Destination Host Unreachable
+
+Le rebranchement du dongle n'a pas restauré automatiquement le chemin AX
+dans l'implémentation courante.
+
+Le code expliquait ce comportement :
+
+    ax88179_link() -> erreur UHS
+            |
+            v
+       link_errors++
+            |
+       après 3 erreurs
+            |
+            v
+    ax_net_poll() -> -2
+
+mais la boucle principale ne fermait ni ne recréait le handle UHS.
+
+Le correctif suivant ajoute :
+
+- netif down / arrêt AX courant ;
+- annulation des bulk RX async ;
+- fermeture UHS ;
+- retry périodique de l'AX88179 ;
+- réinitialisation PHY froide après replug physique ;
+- recréation du netif ;
+- restauration de la lease DHCP de session en mode keep_first ;
+- reprise du polling sans reboot de la Wii U.
+
+Une erreur séparée a aussi été trouvée dans le chemin link-down :
+
+    ax_net_address() peut retourner NULL
+
+alors que la boucle principale utilisait ensuite :
+
+    if (!ip[0])
+
+Le test câble Ethernet suivant nécessite donc également de rendre ce test
+NULL-safe.

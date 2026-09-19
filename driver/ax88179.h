@@ -34,6 +34,13 @@ typedef struct Ax88179 Ax88179;
 Ax88179 *ax88179_open(char *why, unsigned why_size);
 void     ax88179_close(Ax88179 *ax);
 
+/*
+ * A physical USB unplug/replug resets the adapter even though this Aroma
+ * session has already opened it before. Force the next open through the
+ * complete cold PHY initialization/autonegotiation path.
+ */
+void     ax88179_force_cold_next_open(void);
+
 /* The adapter's own hardware address, read out of it. */
 const uint8_t *ax88179_mac(const Ax88179 *ax);
 

@@ -200,6 +200,17 @@ static unsigned phy_init_generation;
 static int debug_last_link = -1;
 static OSTime debug_link_start;
 
+void
+ax88179_force_cold_next_open(void)
+{
+    /*
+     * A physically reattached AX88179 is a freshly reset chip, not the
+     * warm device from the previous title transition.
+     */
+    phy_init_generation = 0;
+    debug_last_link = -1;
+}
+
 #define PHY_LOG(fmt, ...) \
     WHBLogPrintf("[%llu] PHY: " fmt, \
         (unsigned long long)OSTicksToMilliseconds(OSGetTime()), ##__VA_ARGS__)

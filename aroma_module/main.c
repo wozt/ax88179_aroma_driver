@@ -22,7 +22,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.22-async-usb-rx-ring-align");
+WUMS_MODULE_VERSION("0.2.23-hotplug-reconnect");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -140,6 +140,105 @@ static int run_watchdog(int argc, const char **argv)
 static atomic_bool stopping;
 static int started;
 static atomic_uint worker_generation;
+
+/*
+ * Recover from a physical AX88179 USB removal without restarting the
+ * title or the console.
+ *
+ * Existing TCP connections are not promised to survive a real cable/USB
+ * outage. The guarantee here is that the interface itself is rebuilt and
+ * new traffic can use AX again after the device returns.
+ */
+static int
+recover_adapter(Ax88179 **current)
+{
+    if (!current)
+        return -1;
+
+    /*
+     * Logging is currently routed through AX, so it cannot be relied on
+     * while the device is absent. Re-create the UDP logger only after the
+     * recovered interface has an address again.
+     */
+    WHBLogUdpDeinit();
+
+    if (*current) {
+        ax_net_stop();
+        ax88179_close(*current);
+        *current = NULL;
+    }
+
+    /*
+     * Replugging USB power-cycles the chip. Do not use the title-transition
+     * warm PHY shortcut on the replacement device.
+     */
+    ax88179_force_cold_next_open();
+
+    while (!atomic_load_explicit(&stopping, memory_order_acquire)) {
+        OSSleepTicks(OSMillisecondsToTicks(1000));
+
+        char why[160];
+        Ax88179 *candidate =
+            ax88179_open(why, sizeof(why));
+
+        if (!candidate)
+            continue;
+
+        if (ax_net_start(candidate) != 0) {
+            ax88179_close(candidate);
+            ax88179_force_cold_next_open();
+            continue;
+        }
+
+        /*
+         * keep_first normally restores the cached address immediately
+         * once link comes back. dhcp=always may need a complete new lease,
+         * so allow enough time for either mode.
+         */
+        OSTime deadline =
+            OSGetTime() +
+            OSMillisecondsToTicks(35000);
+
+        int healthy = 0;
+
+        while (!atomic_load_explicit(&stopping, memory_order_acquire) &&
+               OSGetTime() < deadline) {
+
+            int n = ax_net_poll();
+
+            if (n == -2)
+                break;
+
+            const char *ip =
+                ax_net_address();
+
+            if (ip && ip[0]) {
+                *current = candidate;
+                healthy = 1;
+
+                /*
+                 * The old logger socket died with the missing interface.
+                 * Open a fresh one now that the AX route exists again.
+                 */
+                WHBLogUdpInit();
+                AX_LOG("hotplug recovered %s", ip);
+                break;
+            }
+
+            OSSleepTicks(
+                OSMillisecondsToTicks(20));
+        }
+
+        if (healthy)
+            return 0;
+
+        ax_net_stop();
+        ax88179_close(candidate);
+        ax88179_force_cold_next_open();
+    }
+
+    return -1;
+}
 
 /* The worker exclusively owns UHS and lwIP. App transition hooks only signal
  * stop, then join before per-title resources/newlib are finalized. */
@@ -289,6 +388,20 @@ static int run_network(int argc, const char **argv)
     while (!atomic_load_explicit(&stopping, memory_order_acquire)) {
         int n = ax_net_poll();
 
+        if (n == -2) {
+            /*
+             * Repeated PHY/control failures mean the UHS interface has
+             * disappeared. Rebuild it in-place instead of spinning forever
+             * on a dead handle.
+             */
+            previous_ip[0] = 0;
+
+            if (recover_adapter(&ax) != 0)
+                break;
+
+            continue;
+        }
+
         const char *ip = ax_net_address();
 
         /*
@@ -316,7 +429,7 @@ static int run_network(int argc, const char **argv)
         }
 
         /* Status heartbeat while waiting for DHCP */
-        if (!ip[0]) {
+        if (!ip || !ip[0]) {
             uint32_t now = (uint32_t)OSTicksToMilliseconds(OSGetTime());
             if ((uint32_t)(now - last_beat) >= 3000) {
                 last_beat = now;
@@ -342,7 +455,12 @@ static int run_network(int argc, const char **argv)
 #endif
     ax_net_stop();
     ax_mark(AX_MARK_NET_STOP);
-    ax88179_close(ax);
+
+    if (ax) {
+        ax88179_close(ax);
+        ax = NULL;
+    }
+
     ax_mark(AX_MARK_ADAPTER_CLOSED);
 
 cleanup:

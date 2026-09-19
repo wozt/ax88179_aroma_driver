@@ -268,7 +268,19 @@ int ax_net_poll(void)
         }
         if (up < 0) link_errors++;
         else link_errors = 0;
-        if (link_errors >= 3) return -2;
+
+        if (link_errors >= 3) {
+            /*
+             * The UHS interface has most likely disappeared. Make the
+             * network state visible as down before the owner closes and
+             * reopens the physical adapter.
+             */
+            if (last_link_up != 0) {
+                set_link(0);
+                last_link_up = 0;
+            }
+            return -2;
+        }
     }
     drain_tx(iface.state, 1);
     /* One bounded receive; timers live in the tcpip thread now. */
