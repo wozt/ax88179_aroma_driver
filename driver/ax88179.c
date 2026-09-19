@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #ifdef AX88179_HOST_TEST
 #include "../tests/uhs_mock.h"
@@ -33,6 +34,31 @@
  */
 #define UHS_DIR_OUT 1
 #define UHS_DIR_IN  2
+
+#ifndef AX88179_HOST_TEST
+/*
+ * Exported by nsysuhs.rpl but currently missing from WUT's public uhs.h.
+ * ABI verified against existing Wii U UHS users.
+ */
+typedef void (*AxUhsBulkAsyncCallback)(
+    void *user,
+    int ret,
+    uint32_t if_handle,
+    uint8_t endpoint,
+    int direction,
+    const void *buffer,
+    size_t actual);
+
+extern int32_t UhsSubmitBulkRequestAsync(
+    UhsHandle *handle,
+    uint32_t if_handle,
+    uint8_t endpoint,
+    int32_t direction,
+    const void *buffer,
+    size_t length,
+    void *user,
+    AxUhsBulkAsyncCallback callback);
+#endif
 
 /* --- the chip, as its registers -------------------------------------- */
 /* Numbers from Linux's ax88179_178a.c. A number a chip answers to is a
@@ -93,6 +119,7 @@
 #define MAX_IFACES      16
 /* The bulk IN carries several frames at once, headers and all. */
 #define RX_BUFFER_SIZE  (26 * 1024)
+#define RX_ASYNC_SLOTS  3
 #define RX_CTL_DEFAULT (AX_RX_CTL_DROPCRCERR | AX_RX_CTL_IPE | AX_RX_CTL_START | \
                         AX_RX_CTL_AP | AX_RX_CTL_AB | AX_RX_CTL_AMALL)
 
@@ -122,6 +149,10 @@ struct Ax88179 {
     int       rx_next;        /* which one comes next */
     uint32_t  rx_hdr_offset;  /* where the descriptors live */
     int       rx_pos;         /* how far into the frames we have walked */
+
+    unsigned  rx_consume;
+    int       rx_async_started;
+
     int32_t   last_bulk;      /* what the last bulk request returned */
     /* How long the last failing bulk IN took. A refusal comes back at
      * once; a timeout takes the timeout. That is the whole difference
@@ -134,7 +165,33 @@ struct Ax88179 {
  * stack that moves. */
 static uint8_t g_uhs_work[UHS_WORK_SIZE] __attribute__((aligned(0x40)));
 static uint8_t g_ctrl[64] __attribute__((aligned(0x40)));
-static uint8_t g_rx[RX_BUFFER_SIZE] __attribute__((aligned(0x40)));
+
+/*
+ * g_rx remains the parser-owned snapshot. UHS itself DMA-writes into the
+ * three ring buffers so a new transfer can already be pending while the
+ * previous aggregate is being parsed.
+ */
+static uint8_t g_rx[RX_BUFFER_SIZE]
+    __attribute__((aligned(0x40)));
+
+static uint8_t g_rx_async[RX_ASYNC_SLOTS][RX_BUFFER_SIZE]
+    __attribute__((aligned(0x100)));
+
+enum {
+    AX_RX_SLOT_IDLE = 0,
+    AX_RX_SLOT_PENDING,
+    AX_RX_SLOT_DONE
+};
+
+struct AxRxAsyncSlot {
+    atomic_int state;
+    int32_t ret;
+    uint32_t actual;
+    uint8_t *buffer;
+};
+
+static struct AxRxAsyncSlot g_rx_slots[RX_ASYNC_SLOTS];
+
 static uint8_t g_tx[2048] __attribute__((aligned(0x40)));
 static UhsInterfaceProfile g_profiles[MAX_IFACES] __attribute__((aligned(0x40)));
 /* Static DMA buffers: one instance, called serially by its owner thread. */
@@ -153,6 +210,231 @@ static uint32_t le32(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
            ((uint32_t)p[3] << 24);
 }
+
+
+#ifndef AX88179_HOST_TEST
+static void
+ax_rx_async_callback(
+    void *user,
+    int ret,
+    uint32_t if_handle,
+    uint8_t endpoint,
+    int direction,
+    const void *buffer,
+    size_t actual)
+{
+    (void)if_handle;
+    (void)endpoint;
+    (void)direction;
+
+    struct AxRxAsyncSlot *slot =
+        (struct AxRxAsyncSlot *)user;
+
+    if (!slot || buffer != slot->buffer) {
+        return;
+    }
+
+    slot->ret = ret;
+    slot->actual = (uint32_t)actual;
+
+    atomic_store_explicit(
+        &slot->state,
+        AX_RX_SLOT_DONE,
+        memory_order_release);
+}
+
+static int
+ax_rx_submit_slot(
+    Ax88179 *ax,
+    unsigned index)
+{
+    struct AxRxAsyncSlot *slot =
+        &g_rx_slots[index];
+
+    DCFlushRange(
+        slot->buffer,
+        RX_BUFFER_SIZE);
+
+    slot->ret = 0;
+    slot->actual = 0;
+
+    atomic_store_explicit(
+        &slot->state,
+        AX_RX_SLOT_PENDING,
+        memory_order_release);
+
+    int32_t rc =
+        UhsSubmitBulkRequestAsync(
+            &ax->handle,
+            ax->if_handle,
+            ax->ep_in,
+            UHS_DIR_IN,
+            slot->buffer,
+            RX_BUFFER_SIZE,
+            slot,
+            ax_rx_async_callback);
+
+    if (rc != 0) {
+        atomic_store_explicit(
+            &slot->state,
+            AX_RX_SLOT_IDLE,
+            memory_order_release);
+
+        ax->last_bulk = rc;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int
+ax_rx_start_async(
+    Ax88179 *ax)
+{
+    ax->rx_consume = 0;
+    ax->rx_async_started = 1;
+
+    for (unsigned i = 0;
+         i < RX_ASYNC_SLOTS;
+         i++) {
+
+        g_rx_slots[i].buffer =
+            g_rx_async[i];
+
+        g_rx_slots[i].ret = 0;
+        g_rx_slots[i].actual = 0;
+
+        atomic_store_explicit(
+            &g_rx_slots[i].state,
+            AX_RX_SLOT_IDLE,
+            memory_order_release);
+    }
+
+    for (unsigned i = 0;
+         i < RX_ASYNC_SLOTS;
+         i++) {
+
+        if (ax_rx_submit_slot(ax, i) != 0) {
+            ax->rx_async_started = 0;
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Copy the next completed USB aggregate into parser-owned g_rx and
+ * immediately re-arm its DMA slot.
+ *
+ * Consume slots strictly in submission order (0,1,2,0,1,2...) so packet
+ * ordering is preserved even if several callbacks have already fired.
+ *
+ * Returns:
+ *   1 aggregate loaded
+ *   0 next aggregate not complete
+ *  -1 completed transfer was invalid/error
+ */
+static int
+ax_rx_take_completed(
+    Ax88179 *ax)
+{
+    unsigned index =
+        ax->rx_consume;
+
+    struct AxRxAsyncSlot *slot =
+        &g_rx_slots[index];
+
+    if (atomic_load_explicit(
+            &slot->state,
+            memory_order_acquire) !=
+        AX_RX_SLOT_DONE) {
+        return 0;
+    }
+
+    int32_t ret = slot->ret;
+    uint32_t actual = slot->actual;
+
+    ax->rx_consume =
+        (index + 1) % RX_ASYNC_SLOTS;
+
+    ax->last_bulk = ret;
+    ax->last_bulk_us = 0;
+
+    if (ret < 0 ||
+        actual < 4 ||
+        actual > RX_BUFFER_SIZE) {
+
+        atomic_store_explicit(
+            &slot->state,
+            AX_RX_SLOT_IDLE,
+            memory_order_release);
+
+        /* Keep the ring alive even after one failed transfer. */
+        ax_rx_submit_slot(ax, index);
+
+        return ret < 0 || actual != 0
+            ? -1
+            : 0;
+    }
+
+    DCInvalidateRange(
+        slot->buffer,
+        actual);
+
+    memcpy(
+        g_rx,
+        slot->buffer,
+        actual);
+
+    /*
+     * The DMA slot is no longer needed by the parser: re-arm it before
+     * doing any lwIP work on the copied aggregate.
+     */
+    atomic_store_explicit(
+        &slot->state,
+        AX_RX_SLOT_IDLE,
+        memory_order_release);
+
+    if (ax_rx_submit_slot(ax, index) != 0) {
+        /*
+         * Keep the aggregate we already received. A later poll may recover
+         * the idle slot after the current traffic has been delivered.
+         */
+    }
+
+    ax->rx_len = (int)actual;
+
+    const uint8_t *trailer =
+        g_rx + ax->rx_len - 4;
+
+    const uint32_t rx_hdr =
+        le32(trailer);
+
+    ax->rx_frames =
+        (int)(rx_hdr & 0xFFFF);
+
+    ax->rx_hdr_offset =
+        (rx_hdr >> 16) & 0xFFFF;
+
+    ax->rx_next = 0;
+    ax->rx_pos = 0;
+
+    if (ax->rx_frames == 0) {
+        return 0;
+    }
+
+    if (ax->rx_hdr_offset +
+            4u * (uint32_t)ax->rx_frames >
+        (uint32_t)ax->rx_len - 4u) {
+
+        ax->rx_frames = 0;
+        return -1;
+    }
+
+    return 1;
+}
+#endif
 
 static void sleep_ms(int ms)
 {
@@ -400,7 +682,7 @@ Ax88179 *ax88179_open(char *why, unsigned why_size)
     uint32_t ep_mask = ax->ep_in_mask;
     stage = "enable bulk IN";
     int32_t ep_result = (int32_t)UhsAdministerEndpoint(&ax->handle, ax->if_handle,
-        UHS_ADMIN_EP_ENABLE, ep_mask, 1, sizeof(g_rx));
+        UHS_ADMIN_EP_ENABLE, ep_mask, RX_ASYNC_SLOTS, RX_BUFFER_SIZE);
     if (ep_result < 0) goto ep_fail;
     ax->enabled_eps |= ep_mask;
     stage = "enable bulk OUT";
@@ -431,6 +713,21 @@ void ax88179_close(Ax88179 *ax)
         return;
     }
     mac_write16(ax, AX_RX_CTL, 0);
+
+#ifndef AX88179_HOST_TEST
+    ax->rx_async_started = 0;
+
+    if (ax->ep_in_mask) {
+        UhsAdministerEndpoint(
+            &ax->handle,
+            ax->if_handle,
+            UHS_ADMIN_EP_CANCEL,
+            ax->ep_in_mask,
+            0,
+            0);
+    }
+#endif
+
     if (ax->enabled_eps)
         UhsAdministerEndpoint(&ax->handle, ax->if_handle, UHS_ADMIN_EP_DISABLE,
                               ax->enabled_eps, 0, 0);
@@ -623,9 +920,10 @@ ax88179_receive(
     int max_length,
     int timeout_us)
 {
+    (void)timeout_us;
+
     if (!ax || !frame ||
-        max_length < 14 ||
-        timeout_us < 0) {
+        max_length < 14) {
         return -1;
     }
 
@@ -634,8 +932,7 @@ ax88179_receive(
     }
 
     /*
-     * Always consume anything remaining from the previous USB aggregate
-     * before asking UHS for another bulk transfer.
+     * Finish the parser-owned aggregate first.
      */
     int n =
         ax88179_receive_buffered_impl(
@@ -647,80 +944,34 @@ ax88179_receive(
         return n;
     }
 
-    DCFlushRange(g_rx, sizeof(g_rx));
+#ifdef AX88179_HOST_TEST
+    return 0;
+#else
+    /*
+     * First active receive starts three UHS bulk-IN requests. Subsequent
+     * calls merely harvest completed slots; there is no blocking USB wait
+     * in this path.
+     */
+    if (!ax->rx_async_started) {
+        if (ax_rx_start_async(ax) != 0) {
+            return -1;
+        }
 
-    const OSTime t0 =
-        OSGetTime();
-
-    const int32_t got =
-        UhsSubmitBulkRequest(
-            &ax->handle,
-            ax->if_handle,
-            ax->ep_in,
-            UHS_DIR_IN,
-            g_rx,
-            sizeof(g_rx),
-            timeout_us);
-
-    ax->last_bulk_us =
-        (uint32_t)OSTicksToMicroseconds(
-            OSGetTime() - t0);
-
-    ax->last_bulk = got;
-
-    if (got == AX_UHS_NO_DATA) {
         return 0;
     }
 
-    if (got < 0) {
-        return -1;
-    }
+    int loaded =
+        ax_rx_take_completed(ax);
 
-    if (got == 0) {
-        return 0;
-    }
-
-    if (got < 4 ||
-        got > (int32_t)sizeof(g_rx)) {
-        return -1;
-    }
-
-    DCInvalidateRange(
-        g_rx,
-        sizeof(g_rx));
-
-    ax->rx_len = (int)got;
-
-    const uint8_t *trailer =
-        g_rx + ax->rx_len - 4;
-
-    const uint32_t rx_hdr =
-        le32(trailer);
-
-    ax->rx_frames =
-        (int)(rx_hdr & 0xFFFF);
-
-    ax->rx_hdr_offset =
-        (rx_hdr >> 16) & 0xFFFF;
-
-    ax->rx_next = 0;
-    ax->rx_pos = 0;
-
-    if (ax->rx_frames == 0) {
-        return 0;
-    }
-
-    if (ax->rx_hdr_offset +
-            4u * (uint32_t)ax->rx_frames >
-        (uint32_t)ax->rx_len - 4u) {
-        ax->rx_frames = 0;
-        return -1;
+    if (loaded <= 0) {
+        return loaded;
     }
 
     return ax88179_receive_buffered_impl(
         ax,
         frame,
         max_length);
+#endif
 }
 
 int32_t ax88179_last_bulk(const Ax88179 *ax)

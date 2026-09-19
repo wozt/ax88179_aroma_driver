@@ -99,12 +99,12 @@
  * Coreinit uses 0 as highest priority.
  *
  * sys_thread_new maps lwIP priority N to Coreinit 4+N.
- * Keep the tcpip consumer just below the AX/UHS worker (priority 16),
- * so USB RX can stay serviced while the tcpip mailbox contains a burst.
+ * Priority 1 therefore maps the tcpip thread to Coreinit priority 5.
  *
- * 4 + 13 = Coreinit priority 17.
+ * A characterization run with Coreinit priority 17 caused severe RX
+ * regression, so keep the previously validated priority 5.
  */
-#define TCPIP_THREAD_PRIO 13
+#define TCPIP_THREAD_PRIO 1
 #define DEFAULT_THREAD_STACKSIZE (16 * 1024)
 #define DEFAULT_THREAD_PRIO 2
 /*

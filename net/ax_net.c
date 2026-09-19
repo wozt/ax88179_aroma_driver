@@ -306,16 +306,18 @@ int ax_net_poll(void)
          * for the device/input path to overflow before socket queues were
          * full.
          *
-         * Drain the complete already-fetched aggregate now. This function
-         * performs no new USB request, so this loop is bounded by the
-         * current 26 KiB bulk buffer.
+         * Drain the complete current aggregate and immediately harvest any
+         * following asynchronous USB aggregates which have already
+         * completed. Their DMA slots are re-armed before frame delivery,
+         * so UHS remains pipelined while lwIP consumes the copied data.
          */
         for (;;) {
             int more =
-                ax88179_receive_buffered(
+                ax88179_receive(
                     iface.state,
                     rx_frame,
-                    sizeof(rx_frame));
+                    sizeof(rx_frame),
+                    0);
 
             if (more > 0) {
                 input_rx_frame(more);

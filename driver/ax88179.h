@@ -50,8 +50,12 @@ int32_t ax88179_last_control(const Ax88179 *ax);
 int ax88179_send(Ax88179 *ax, const void *frame, int length);
 
 /*
- * One ethernet frame in, 0 when none arrived, -1 on USB/malformed data.
- * At most one bulk transfer per call; last_bulk preserves UHS errors.
+ * One ethernet frame in, 0 when none is currently ready, -1 on
+ * USB/malformed data.
+ *
+ * On Wii U the RX path keeps three asynchronous UHS bulk-IN requests
+ * pending. Completed aggregates are copied into a parser-owned snapshot,
+ * their DMA slot is immediately re-armed, and frames are then unwrapped.
  *
  * The adapter does not hand over bare frames: a bulk transfer carries
  * several, wrapped in the chip's own receive header, and this unwraps
