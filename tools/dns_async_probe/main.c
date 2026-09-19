@@ -33,6 +33,9 @@ static struct export_desc exports[] = {
     { "clear_resolver_cache", NULL },
     { "set_resolver_allocator", NULL },
     { "freeaddrinfo",           NULL },
+    { "socket_lib_init",        NULL },
+    { "socket_lib_finish",      NULL },
+    { "socketlasterr",          NULL },
 };
 
 static uintptr_t branch_target(uintptr_t pc, uint32_t insn)
@@ -2788,6 +2791,209 @@ static void run_shim_gethostbyaddr_probe(void)
         "=== END AX SHIM GETHOSTBYADDR TEST ===");
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Native socket_lib_init behaviour                                   */
+
+typedef int (*raw_socket_lib_init_fn)(void);
+typedef int (*raw_socketlasterr_fn)(void);
+
+struct socketlib_init_result {
+    int worker_rc;
+
+    int lasterr_before;
+
+    int init1_r3;
+    int lasterr_after_init1;
+
+    int init2_r3;
+    int lasterr_after_init2;
+
+    uint64_t init1_ms;
+    uint64_t init2_ms;
+};
+
+static struct socketlib_init_result
+socketlib_init_result;
+
+static OSThread socketlib_init_thread
+    __attribute__((aligned(0x40)));
+
+static uint8_t
+socketlib_init_stack[BEHAVIOR_STACK_SIZE]
+    __attribute__((aligned(0x40)));
+
+static atomic_int socketlib_init_done;
+
+static int socketlib_init_worker(
+    int argc,
+    const char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    struct socketlib_init_result *r =
+        &socketlib_init_result;
+
+    memset(r, 0, sizeof(*r));
+
+    raw_socket_lib_init_fn init_fn =
+        (raw_socket_lib_init_fn)find_export_addr(
+            "socket_lib_init");
+
+    raw_socketlasterr_fn lasterr_fn =
+        (raw_socketlasterr_fn)find_export_addr(
+            "socketlasterr");
+
+    if (!init_fn || !lasterr_fn) {
+        r->worker_rc = -1;
+        atomic_store(
+            &socketlib_init_done,
+            1);
+        return -1;
+    }
+
+    /*
+     * No probe_say/UI from this worker.
+     *
+     * The process is already initialised by WUT before main(), so these
+     * calls specifically characterize repeated socket_lib_init().
+     */
+    r->lasterr_before =
+        lasterr_fn();
+
+    OSTime begin =
+        OSGetTime();
+
+    r->init1_r3 =
+        init_fn();
+
+    OSTime end =
+        OSGetTime();
+
+    r->init1_ms =
+        OSTicksToMilliseconds(
+            end - begin);
+
+    r->lasterr_after_init1 =
+        lasterr_fn();
+
+    begin =
+        OSGetTime();
+
+    r->init2_r3 =
+        init_fn();
+
+    end =
+        OSGetTime();
+
+    r->init2_ms =
+        OSTicksToMilliseconds(
+            end - begin);
+
+    r->lasterr_after_init2 =
+        lasterr_fn();
+
+    r->worker_rc = 0;
+
+    atomic_store(
+        &socketlib_init_done,
+        1);
+
+    return 0;
+}
+
+static void run_socket_lib_init_probe(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== NATIVE SOCKET_LIB_INIT TEST ===");
+
+    memset(
+        &socketlib_init_result,
+        0,
+        sizeof(socketlib_init_result));
+
+    atomic_store(
+        &socketlib_init_done,
+        0);
+
+    BOOL created =
+        OSCreateThread(
+            &socketlib_init_thread,
+            socketlib_init_worker,
+            0,
+            NULL,
+            socketlib_init_stack +
+                sizeof(socketlib_init_stack),
+            sizeof(socketlib_init_stack),
+            16,
+            OS_THREAD_ATTRIB_AFFINITY_ANY);
+
+    if (!created) {
+        probe_say(
+            "SOCKLIB-INIT OSCreateThread FAIL");
+        return;
+    }
+
+    OSSetThreadName(
+        &socketlib_init_thread,
+        "native socket lib init");
+
+    OSResumeThread(
+        &socketlib_init_thread);
+
+    while (!atomic_load(
+               &socketlib_init_done)) {
+
+        if (!probe_poll())
+            return;
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+    }
+
+    int thread_result = -1;
+
+    OSJoinThread(
+        &socketlib_init_thread,
+        &thread_result);
+
+    struct socketlib_init_result *r =
+        &socketlib_init_result;
+
+    probe_say(
+        "SOCKLIB-INIT join=%d worker=%d",
+        thread_result,
+        r->worker_rc);
+
+    if (r->worker_rc == 0) {
+        probe_say(
+            "SOCKLIB-INIT lasterr before=%d",
+            r->lasterr_before);
+
+        /*
+         * WUT declares socket_lib_init() as void. We still record r3
+         * observationally to see what the native implementation leaves
+         * there; do not treat it as public ABI yet.
+         */
+        probe_say(
+            "SOCKLIB-INIT call1 r3=%d lasterr=%d ms=%llu",
+            r->init1_r3,
+            r->lasterr_after_init1,
+            (unsigned long long)r->init1_ms);
+
+        probe_say(
+            "SOCKLIB-INIT call2 r3=%d lasterr=%d ms=%llu",
+            r->init2_r3,
+            r->lasterr_after_init2,
+            (unsigned long long)r->init2_ms);
+    }
+
+    probe_say(
+        "=== END NATIVE SOCKET_LIB_INIT TEST ===");
+}
+
 static void run_shim_dns_abort_probe(void)
 {
     probe_say("%s", "");
@@ -3136,6 +3342,8 @@ int main(void)
     run_dns_abort_rc_matrix();
 
     run_gethostbyaddr_probe();
+
+    run_socket_lib_init_probe();
 
     run_shim_gethostbyaddr_probe();
 
