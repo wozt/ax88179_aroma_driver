@@ -510,6 +510,20 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
                         &native_rcvbuf,
                         sizeof(native_rcvbuf));
 
+        /*
+         * Fresh native TCP sockets expose SO_SNDBUF=8192 and the native
+         * backpressure probe confirms that this value is operational, not
+         * merely metadata.
+         */
+        if ((type & 0xF) == SOCK_STREAM) {
+            int native_sndbuf = 8192;
+            lwip_setsockopt(s,
+                            SOL_SOCKET,
+                            SO_SNDBUF,
+                            &native_sndbuf,
+                            sizeof(native_sndbuf));
+        }
+
         /* lwIP refuses broadcast sends without SO_BROADCAST, nsysnet does
          * not -- and whb's UDP logger never sets it. Allow it upfront or
          * every broadcast sendto (logs, LAN discovery) silently fails. */
@@ -652,6 +666,13 @@ DECL_FUNCTION(int, accept, int sockfd, struct nsn_sockaddr *addr, socklen_t *add
     socklen_t llen = sizeof(l);
     int s = lwip_accept(stack_fd(sockfd), addr ? (struct sockaddr *)&l : NULL, addr ? &llen : NULL);
     if (s >= 0) {
+        int native_sndbuf = 8192;
+        lwip_setsockopt(s,
+                        SOL_SOCKET,
+                        SO_SNDBUF,
+                        &native_sndbuf,
+                        sizeof(native_sndbuf));
+
         /*
          * accept() can only produce a connection-oriented socket here.
          * Keep the native placeholder the same type as the accepted
@@ -1425,6 +1446,24 @@ DECL_FUNCTION(int, setsockopt, int sockfd, int level, int optname,
                 return -1;
             }
 
+            /*
+             * Negative values are native-valid ABI values but their real
+             * queue semantics have not been characterized. Preserve them
+             * visibly without changing lwIP's backing queue.
+             *
+             * Zero and positive values have measured network effects and
+             * therefore update the real per-PCB lwIP send capacity.
+             */
+            if (value >= 0) {
+                int r = lwip_setsockopt(stack_fd(sockfd),
+                                        SOL_SOCKET,
+                                        SO_SNDBUF,
+                                        &value,
+                                        sizeof(value));
+                if (r != 0)
+                    return r;
+            }
+
             atomic_store(&compat_sock[sockfd].sndbuf, value);
             return 0;
         }
@@ -1683,11 +1722,24 @@ DECL_FUNCTION(int, getsockopt, int sockfd, int level, int optname,
         }
 
         /*
-         * Native returns zero for TXDATA on a fresh socket.
-         * lwIP exposes no equivalent queued-send byte counter.
+         * Native SO_TXDATA reports real outstanding TCP transmit data.
+         * The patched lwIP socket layer exposes snd_lbb-lastack for this.
          */
-        case NSN_SO_TXDATA:
-            return compat_get_int(optval, optlen, 0);
+        case NSN_SO_TXDATA: {
+            int value = 0;
+            socklen_t len = sizeof(value);
+
+            int r = lwip_getsockopt(stack_fd(sockfd),
+                                    SOL_SOCKET,
+                                    SO_TXDATA,
+                                    &value,
+                                    &len);
+
+            if (r != 0)
+                return r;
+
+            return compat_get_int(optval, optlen, value);
+        }
 
         case NSN_SO_MYADDR:
             if (!optval || !optlen ||

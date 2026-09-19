@@ -3118,6 +3118,30 @@ lwip_getsockopt_impl(int s, int level, int optname, void *optval, socklen_t *opt
                                       s, *(int *)optval));
           break;
 
+#if LWIP_TCP
+        case SO_SNDBUF:
+          LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, *optlen, int);
+          if ((NETCONNTYPE_GROUP(netconn_type(sock->conn)) == NETCONN_TCP) &&
+              (sock->conn->pcb.tcp != NULL) &&
+              (sock->conn->pcb.tcp->state != LISTEN)) {
+            *(int *)optval = (int)tcp_sndbuf_max(sock->conn->pcb.tcp);
+          } else {
+            *(int *)optval = 0;
+          }
+          break;
+
+        case SO_TXDATA:
+          LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, *optlen, int);
+          if ((NETCONNTYPE_GROUP(netconn_type(sock->conn)) == NETCONN_TCP) &&
+              (sock->conn->pcb.tcp != NULL) &&
+              (sock->conn->pcb.tcp->state != LISTEN)) {
+            *(int *)optval = (int)tcp_txdata(sock->conn->pcb.tcp);
+          } else {
+            *(int *)optval = 0;
+          }
+          break;
+#endif /* LWIP_TCP */
+
 #if LWIP_SO_SNDTIMEO
         case SO_SNDTIMEO:
           LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, *optlen, LWIP_SO_SNDRCVTIMEO_OPTTYPE);
@@ -3531,6 +3555,57 @@ lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_
           break;
         }
 #endif /* LWIP_SO_RCVTIMEO */
+#if LWIP_TCP
+        case SO_SNDBUF: {
+          int requested;
+          LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, optlen, int);
+          requested = *(const int *)optval;
+
+          /*
+           * Negative values are accepted by native nsysnet as ABI state.
+           * Their real queue semantics are not characterized, so leave the
+           * actual lwIP queue unchanged for negative requests.
+           */
+          if ((requested >= 0) &&
+              (NETCONNTYPE_GROUP(netconn_type(sock->conn)) == NETCONN_TCP) &&
+              (sock->conn->pcb.tcp != NULL) &&
+              (sock->conn->pcb.tcp->state != LISTEN)) {
+            struct tcp_pcb *pcb = sock->conn->pcb.tcp;
+            u32_t effective;
+            tcpwnd_size_t used;
+
+            if (requested == 0) {
+              effective = 0;
+            } else {
+              /*
+               * Native Wii U measurements show allocation granularity close
+               * to one Ethernet TCP MSS. Keep the user-visible value exact,
+               * but use segment-sized backing capacity internally.
+               */
+              effective =
+                (((u32_t)requested + (u32_t)TCP_MSS - 1U) /
+                 (u32_t)TCP_MSS) * (u32_t)TCP_MSS;
+
+              if (effective > 0xFFFFU) {
+                effective = 0xFFFFU;
+              }
+            }
+
+            used = (pcb->snd_buf_max >= pcb->snd_buf)
+                     ? (tcpwnd_size_t)(pcb->snd_buf_max - pcb->snd_buf)
+                     : pcb->snd_buf_max;
+
+            pcb->snd_buf_max = (tcpwnd_size_t)effective;
+
+            pcb->snd_buf =
+              (used >= pcb->snd_buf_max)
+                ? 0
+                : (tcpwnd_size_t)(pcb->snd_buf_max - used);
+          }
+          break;
+        }
+#endif /* LWIP_TCP */
+
 #if LWIP_SO_RCVBUF
         case SO_RCVBUF:
           LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, optlen, int);

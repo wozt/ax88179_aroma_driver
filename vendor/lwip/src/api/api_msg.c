@@ -399,7 +399,7 @@ poll_tcp(void *arg, struct tcp_pcb *pcb)
   if (conn->flags & NETCONN_FLAG_CHECK_WRITESPACE) {
     /* If the queued byte- or pbuf-count drops below the configured low-water limit,
        let select mark this pcb as writable again. */
-    if ((conn->pcb.tcp != NULL) && (tcp_sndbuf(conn->pcb.tcp) > TCP_SNDLOWAT) &&
+    if ((conn->pcb.tcp != NULL) && (tcp_sndbuf(conn->pcb.tcp) > tcp_sndlowat(conn->pcb.tcp)) &&
         (tcp_sndqueuelen(conn->pcb.tcp) < TCP_SNDQUEUELOWAT)) {
       netconn_clear_flags(conn, NETCONN_FLAG_CHECK_WRITESPACE);
       API_EVENT(conn, NETCONN_EVT_SENDPLUS, 0);
@@ -433,7 +433,7 @@ sent_tcp(void *arg, struct tcp_pcb *pcb, u16_t len)
 
     /* If the queued byte- or pbuf-count drops below the configured low-water limit,
        let select mark this pcb as writable again. */
-    if ((conn->pcb.tcp != NULL) && (tcp_sndbuf(conn->pcb.tcp) > TCP_SNDLOWAT) &&
+    if ((conn->pcb.tcp != NULL) && (tcp_sndbuf(conn->pcb.tcp) > tcp_sndlowat(conn->pcb.tcp)) &&
         (tcp_sndqueuelen(conn->pcb.tcp) < TCP_SNDQUEUELOWAT)) {
       netconn_clear_flags(conn, NETCONN_FLAG_CHECK_WRITESPACE);
       API_EVENT(conn, NETCONN_EVT_SENDPLUS, len);
@@ -1353,7 +1353,17 @@ lwip_netconn_do_connected(void *arg, struct tcp_pcb *pcb, err_t err)
               (!was_blocking && op_completed_sem == NULL));
   conn->current_msg = NULL;
   conn->state = NETCONN_NONE;
-  API_EVENT(conn, NETCONN_EVT_SENDPLUS, 0);
+
+  /*
+   * A zero-sized send buffer is allowed by nsysnet but a nonblocking
+   * connection does not become writable. Preserve the connection state
+   * internally while withholding the SENDPLUS event in that special case.
+   */
+  if ((err != ERR_OK) ||
+      (pcb == NULL) ||
+      (tcp_sndbuf_max(pcb) != 0)) {
+    API_EVENT(conn, NETCONN_EVT_SENDPLUS, 0);
+  }
 
   if (was_blocking) {
     sys_sem_signal(op_completed_sem);
@@ -1755,7 +1765,7 @@ err_mem:
            and let poll_tcp check writable space to mark the pcb writable again */
         API_EVENT(conn, NETCONN_EVT_SENDMINUS, 0);
         conn->flags |= NETCONN_FLAG_CHECK_WRITESPACE;
-      } else if ((tcp_sndbuf(conn->pcb.tcp) <= TCP_SNDLOWAT) ||
+      } else if ((tcp_sndbuf(conn->pcb.tcp) <= tcp_sndlowat(conn->pcb.tcp)) ||
                  (tcp_sndqueuelen(conn->pcb.tcp) >= TCP_SNDQUEUELOWAT)) {
         /* The queued byte- or pbuf-count exceeds the configured low-water limit,
            let select mark this pcb as non-writable. */

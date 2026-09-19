@@ -217,7 +217,7 @@ struct ifreq {
 #define SO_DONTLINGER   ((int)(~SO_LINGER))
 #define SO_OOBINLINE    0x0100 /* Unimplemented: leave received OOB data in line */
 #define SO_REUSEPORT    0x0200 /* Unimplemented: allow local address & port reuse */
-#define SO_SNDBUF       0x1001 /* Unimplemented: send buffer size */
+#define SO_SNDBUF       0x1001 /* send buffer size */
 #define SO_RCVBUF       0x1002 /* receive buffer size */
 #define SO_SNDLOWAT     0x1003 /* Unimplemented: send low-water mark */
 #define SO_RCVLOWAT     0x1004 /* Unimplemented: receive low-water mark */
@@ -228,6 +228,12 @@ struct ifreq {
 #define SO_CONTIMEO     0x1009 /* Unimplemented: connect timeout */
 #define SO_NO_CHECK     0x100a /* don't create UDP checksum */
 #define SO_BINDTODEVICE 0x100b /* bind to device */
+
+/*
+ * Wii U compatibility extension used by the nsysnet shim.
+ * Reports TCP data currently buffered/in flight and not yet ACKed.
+ */
+#define SO_TXDATA       0x1012
 
 /*
  * Structure used for manipulating linger option.

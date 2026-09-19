@@ -1319,7 +1319,10 @@ tcp_receive(struct tcp_pcb *pcb)
       }
 #endif /* LWIP_IPV6 && LWIP_ND6_TCP_REACHABILITY_HINTS*/
 
-      pcb->snd_buf = (tcpwnd_size_t)(pcb->snd_buf + recv_acked);
+      TCP_WND_INC(pcb->snd_buf, recv_acked);
+      if (pcb->snd_buf > pcb->snd_buf_max) {
+        pcb->snd_buf = pcb->snd_buf_max;
+      }
       /* check if this ACK ends our retransmission of in-flight data */
       if (pcb->flags & TF_RTO) {
         /* RTO is done if
