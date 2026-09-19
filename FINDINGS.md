@@ -1442,3 +1442,75 @@ Il reste à déterminer comment le résultat est récupéré. L'hypothèse
 suivante à tester est que l'appelant doit rappeler getaddrinfo_async
 avec le même hostname jusqu'à ce que la fonction retourne autre chose
 que EAI_INPROGRESS.
+
+
+## DNS async AX : parité native validée
+
+Les variantes DNS supplémentaires ont été implémentées dans le shim AX :
+
+    getaddrinfo_rs
+    getaddrinfo_async
+    getaddrinfo_async_rs
+
+Le comportement natif avait été mesuré auparavant :
+
+Résolution numérique :
+
+    async("127.0.0.1")
+        initial=0
+        final=0
+        résultat immédiat
+
+Résolution DNS réelle :
+
+    getaddrinfo_async()
+        premier appel -> EAI_INPROGRESS (15)
+        appels suivants -> EAI_INPROGRESS
+        résolution terminée -> 0 + addrinfo
+
+    getaddrinfo_async_rs()
+        même comportement
+
+Le shim AX a ensuite été testé directement.
+
+Résultats AX :
+
+    async-num 127.0.0.1
+        initial=0
+        final=0
+        attempts=1
+        127.0.0.1:80
+
+    async www.gnu.org
+        initial=15
+        final=0
+        attempts=3
+        elapsed=20 ms
+        209.51.188.116:80
+
+    async-rs www.archlinux.org
+        initial=15
+        final=0
+        attempts=5
+        elapsed=40 ms
+        209.126.35.79:80
+
+    sync-rs www.freebsd.org
+        initial=0
+        final=0
+        attempts=1
+        elapsed=105 ms
+        5.196.63.70:80
+
+Conclusion :
+
+    [✓] getaddrinfo_rs
+    [✓] getaddrinfo_async
+    [✓] getaddrinfo_async_rs
+    [✓] EAI_INPROGRESS natif reproduit
+    [✓] polling async natif reproduit
+    [✓] résolution DNS async transportée par lwIP / AX88179
+
+Le resolver AX utilise le DNS asynchrone raw de lwIP plutôt qu'un thread
+bloquant artificiel. Les réponses terminées sont récupérées depuis le
+cache DNS lwIP au polling suivant.
