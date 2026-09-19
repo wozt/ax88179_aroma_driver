@@ -32,7 +32,8 @@
 [ ] hot-unplug / reconnect
 [ ] perte/restauration link
 [ ] DHCP renew/recovery
-[ ] exhaustion sockets/buffers
+[✓] exhaustion sockets
+[ ] exhaustion buffers
 [ ] charge/concurrence
 
 ## Mario Maker / Pretendo validation — NSSL bridge and SO_TCPSACK (2026-09-18)
@@ -1474,3 +1475,98 @@ To reproduce native behaviour, the lwIP socket/PCB pools must provide
 enough internal capacity for at least 28 title sockets plus internal
 stack/logging sockets. The public native placeholder descriptors should
 then naturally impose the correct 28-socket / EMFILE limit.
+
+
+## Socket exhaustion AX/native parity validation
+
+After increasing the lwIP socket resource pools and removing the
+artificial internal descriptor offset, the socket exhaustion probe was
+repeated through the AX path.
+
+The result now exactly matches the native nsysnet reference.
+
+### Native reference
+
+    TCP:
+        count=28
+        descriptors=4..31
+        saturation errno=24
+        socketlasterr=51
+
+    UDP:
+        count=28
+        descriptors=4..31
+        saturation errno=24
+        socketlasterr=51
+
+    MIXED:
+        total=28
+        TCP=14
+        UDP=14
+        descriptors=4..31
+        saturation errno=24
+        socketlasterr=51
+
+    errno 24 = EMFILE
+    nsysnet error 51 = EMFILE
+
+### AX result
+
+After configuring:
+
+    MEMP_NUM_TCP_PCB=32
+    MEMP_NUM_UDP_PCB=32
+    MEMP_NUM_NETCONN=32
+    LWIP_SOCKET_OFFSET=0
+
+the AX path produced exactly:
+
+    TCP:
+        count=28
+        descriptors=4..31
+        saturation errno=24
+        socketlasterr=51
+
+    UDP:
+        count=28
+        descriptors=4..31
+        saturation errno=24
+        socketlasterr=51
+
+    MIXED:
+        total=28
+        TCP=14
+        UDP=14
+        descriptors=4..31
+        saturation errno=24
+        socketlasterr=51
+
+All closes succeeded and socket allocation resumed immediately after
+each exhaustion cycle.
+
+Three complete rounds were identical.
+
+### Repeated AX validation
+
+The AX exhaustion test was also executed both while the optional PC
+Python networking helper was absent and while it was running.
+
+The results were identical.
+
+This is expected because the exhaustion probe only creates unconnected
+sockets; it does not communicate with the PC peer.
+
+### Conclusion
+
+The title-visible socket capacity now matches native nsysnet:
+
+    usable public descriptors = 4..31
+    capacity = 28 sockets
+    29th socket -> EMFILE / socketlasterr 51
+
+The internal lwIP pools now provide enough headroom that the native
+public descriptor table, rather than lwIP resource exhaustion, imposes
+the externally visible limit.
+
+No progressive socket resource leak was observed across repeated
+exhaustion/reclamation cycles.
