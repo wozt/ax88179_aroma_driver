@@ -1389,3 +1389,88 @@ progressive resource leak.
 
 This run is NOT the native reference because both the routing log and
 SO_MYADDR confirmed the AX path.
+
+
+## Socket exhaustion native reference
+
+The socket exhaustion probe was run through the original Wii U nsysnet
+stack.
+
+Path:
+
+    route=native
+    SO_MYADDR=192.168.2.124
+
+The result was identical across all three test rounds.
+
+### TCP
+
+Native nsysnet allowed:
+
+    count=28
+    descriptors=4..31
+    mask=0xfffffff0
+
+The next socket() failed with:
+
+    errno=24
+    socketlasterr=51
+
+This corresponds to:
+
+    EMFILE
+
+All 28 sockets closed successfully and a new socket could immediately
+be allocated again as fd 4.
+
+### UDP
+
+Native nsysnet also allowed:
+
+    count=28
+    descriptors=4..31
+
+The next socket() again failed with:
+
+    errno=24
+    socketlasterr=51
+    error=EMFILE
+
+### Mixed TCP/UDP
+
+Alternating socket types produced:
+
+    total=28
+    TCP=14
+    UDP=14
+    descriptors=4..31
+
+The 29th socket again failed with EMFILE.
+
+### Interpretation
+
+The native limit is therefore primarily the public nsysnet descriptor
+table rather than separate TCP or UDP protocol limits:
+
+    fd 0..3  unavailable/reserved
+    fd 4..31 available to the title
+    total title capacity = 28 sockets
+
+The behaviour was perfectly stable for three complete
+allocate -> exhaust -> close -> reallocate cycles, with no observed
+resource leak.
+
+### AX mismatch discovered
+
+The current AX/lwIP configuration only provides:
+
+    TCP=8
+    UDP=7
+    mixed=15
+
+and currently reaches ENOBUFS before the native descriptor limit.
+
+To reproduce native behaviour, the lwIP socket/PCB pools must provide
+enough internal capacity for at least 28 title sockets plus internal
+stack/logging sockets. The public native placeholder descriptors should
+then naturally impose the correct 28-socket / EMFILE limit.
