@@ -1029,6 +1029,206 @@ static void run_clear_resolver_cache_probe(void)
         "=== END NATIVE CLEAR RESOLVER CACHE TEST ===");
 }
 
+
+static void run_clear_pending_probe(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== NATIVE CLEAR PENDING DNS TEST ===");
+
+    raw_getaddrinfo_fn async_fn =
+        (raw_getaddrinfo_fn)find_export_addr(
+            "getaddrinfo_async");
+
+    raw_freeaddrinfo_fn native_free =
+        (raw_freeaddrinfo_fn)find_export_addr(
+            "freeaddrinfo");
+
+    raw_clear_resolver_cache_fn clear_fn =
+        (raw_clear_resolver_cache_fn)find_export_addr(
+            "clear_resolver_cache");
+
+    if (!async_fn ||
+        !native_free ||
+        !clear_fn) {
+
+        probe_say(
+            "CLEAR-PENDING missing native export");
+        return;
+    }
+
+    /*
+     * Fresh hostname not used by the earlier tests.
+     */
+    const char *host =
+        "www.netbsd.org";
+
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    struct nsn_addrinfo *res = NULL;
+
+    OSTime begin =
+        OSGetTime();
+
+    int rc =
+        async_fn(
+            host,
+            "80",
+            &hints,
+            &res);
+
+    probe_say(
+        "CLEAR-PENDING start rc=%d res=%08x",
+        rc,
+        (unsigned)(uintptr_t)res);
+
+    if (rc == 0 && res) {
+        /*
+         * Unexpected cache hit. Do not pretend this tested the pending
+         * case.
+         */
+        native_free(res);
+
+        probe_say(
+            "CLEAR-PENDING INCONCLUSIVE: hostname already cached");
+
+        probe_say(
+            "=== END NATIVE CLEAR PENDING DNS TEST ===");
+        return;
+    }
+
+    if (rc != NSN_EAI_INPROGRESS) {
+        probe_say(
+            "CLEAR-PENDING unexpected initial rc=%d",
+            rc);
+
+        probe_say(
+            "=== END NATIVE CLEAR PENDING DNS TEST ===");
+        return;
+    }
+
+    /*
+     * Issue ioctl 0x32 while the native resolver request is genuinely
+     * outstanding.
+     */
+    clear_fn();
+
+    probe_say(
+        "CLEAR-PENDING clear called while rc=15");
+
+    /*
+     * Do NOT call getaddrinfo_async during this interval.
+     *
+     * If the original request survives the clear, it has time to finish
+     * and the next poll should normally be an immediate cache hit.
+     *
+     * If clear cancels/flushes it, the next call may have to begin a new
+     * lookup and return EAI_INPROGRESS again.
+     */
+    OSSleepTicks(
+        OSMillisecondsToTicks(750));
+
+    res = NULL;
+
+    OSTime first_poll_begin =
+        OSGetTime();
+
+    rc =
+        async_fn(
+            host,
+            "80",
+            &hints,
+            &res);
+
+    uint64_t first_poll_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - first_poll_begin);
+
+    probe_say(
+        "CLEAR-PENDING first poll after 750ms rc=%d ms=%llu res=%08x",
+        rc,
+        (unsigned long long)first_poll_ms,
+        (unsigned)(uintptr_t)res);
+
+    int first_poll_rc = rc;
+    int attempts = 1;
+
+    OSTime deadline =
+        OSGetTime() +
+        OSMillisecondsToTicks(5000);
+
+    while (rc == NSN_EAI_INPROGRESS &&
+           OSGetTime() < deadline) {
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+
+        res = NULL;
+
+        rc =
+            async_fn(
+                host,
+                "80",
+                &hints,
+                &res);
+
+        attempts++;
+    }
+
+    uint64_t total_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    probe_say(
+        "CLEAR-PENDING final first_poll=%d final=%d attempts=%d total=%llu ms res=%08x",
+        first_poll_rc,
+        rc,
+        attempts,
+        (unsigned long long)total_ms,
+        (unsigned)(uintptr_t)res);
+
+    if (rc == 0 && res) {
+        struct nsn_addrinfo *first =
+            res;
+
+        char ip[32] = "?";
+
+        if (first->ai_addr &&
+            first->ai_addrlen >=
+                sizeof(struct nsn_sockaddr_in) &&
+            first->ai_addr->sa_family == 2) {
+
+            struct nsn_sockaddr_in *sin =
+                (struct nsn_sockaddr_in *)
+                    first->ai_addr;
+
+            struct in_addr a = {
+                .s_addr = sin->sin_addr
+            };
+
+            inet_ntop(
+                AF_INET,
+                &a,
+                ip,
+                sizeof(ip));
+        }
+
+        probe_say(
+            "CLEAR-PENDING result ip=%s",
+            ip);
+
+        native_free(res);
+    }
+
+    probe_say(
+        "=== END NATIVE CLEAR PENDING DNS TEST ===");
+}
+
 static void run_shim_dns_probe(void)
 {
     probe_say("%s", "");
@@ -1246,6 +1446,8 @@ int main(void)
     run_async_poll_probe();
 
     run_clear_resolver_cache_probe();
+
+    run_clear_pending_probe();
 
     run_shim_dns_probe();
 
