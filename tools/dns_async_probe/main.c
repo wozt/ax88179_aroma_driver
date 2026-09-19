@@ -286,6 +286,11 @@ extern void RPLWRAP(freeaddrinfo)(
 extern int RPLWRAP(dns_abort_by_hname)(
     const char *hostname);
 
+extern struct hostent *RPLWRAP(gethostbyaddr)(
+    const void *addr,
+    size_t len,
+    int type);
+
 typedef int (*raw_getaddrinfo_fn)(
     const char *node,
     const char *service,
@@ -2046,6 +2051,7 @@ struct ghba_case {
 
 static const struct ghba_case ghba_cases[] = {
     { "google",      "8.8.8.8",     4, 2 },
+    { "google-alt",  "8.8.4.4",     4, 2 },
     { "cloudflare",  "1.1.1.1",     4, 2 },
     { "no-ptr",      "192.0.2.1",   4, 2 },
     { "bad-len",     "8.8.8.8",     3, 2 },
@@ -2504,6 +2510,284 @@ static void run_gethostbyaddr_probe(void)
         "=== END NATIVE GETHOSTBYADDR TEST ===");
 }
 
+
+/* ------------------------------------------------------------------ */
+/* AX shim gethostbyaddr parity                                       */
+
+static struct ghba_result
+shim_ghba_results[GHBA_CASE_COUNT];
+
+static int shim_gethostbyaddr_case_worker(
+    int argc,
+    const char **argv)
+{
+    (void)argv;
+
+    unsigned index =
+        (unsigned)argc;
+
+    if (index >= GHBA_CASE_COUNT) {
+        atomic_store(&ghba_done, 1);
+        return -1;
+    }
+
+    const struct ghba_case *c =
+        &ghba_cases[index];
+
+    struct ghba_result *r =
+        &shim_ghba_results[index];
+
+    memset(r, 0, sizeof(*r));
+
+    struct in_addr addr;
+
+    if (inet_pton(
+            AF_INET,
+            c->ip,
+            &addr) != 1) {
+
+        r->worker_rc = -2;
+        atomic_store(&ghba_done, 1);
+        return -2;
+    }
+
+    /*
+     * Directly seed our title-visible h_errno.
+     *
+     * Unlike the native characterization probe, we already own this
+     * process variable and only need to verify that the AX hook preserves
+     * it exactly.
+     */
+    r->herr_initial =
+        h_errno;
+
+    h_errno = 1;
+
+    r->herr_after_seed_failure =
+        h_errno;
+
+    r->herr_before =
+        h_errno;
+
+    OSTime begin =
+        OSGetTime();
+
+    /*
+     * IMPORTANT:
+     * RPLWRAP() goes through the nsysnet export and therefore through
+     * FunctionPatcher. This exercises the actual AX gethostbyaddr hook.
+     */
+    struct hostent *h =
+        RPLWRAP(gethostbyaddr)(
+            &addr,
+            c->len,
+            c->type);
+
+    /*
+     * Snapshot before doing anything else. No probe_say/UI from worker.
+     */
+    snapshot_native_hostent(
+        &r->snap,
+        h);
+
+    OSTime end =
+        OSGetTime();
+
+    r->herr_after =
+        h_errno;
+
+    r->elapsed_ms =
+        OSTicksToMilliseconds(
+            end - begin);
+
+    r->worker_rc = 0;
+
+    atomic_store(
+        &ghba_done,
+        1);
+
+    return 0;
+}
+
+static void run_shim_gethostbyaddr_probe(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== AX SHIM GETHOSTBYADDR TEST ===");
+
+    for (unsigned i = 0;
+         i < GHBA_CASE_COUNT;
+         i++) {
+
+        const struct ghba_case *c =
+            &ghba_cases[i];
+
+        struct ghba_result *r =
+            &shim_ghba_results[i];
+
+        memset(r, 0, sizeof(*r));
+
+        probe_say(
+            "AX-GHBA CASE %u/%u label=%s",
+            i + 1,
+            (unsigned)GHBA_CASE_COUNT,
+            c->label);
+
+        atomic_store(
+            &ghba_done,
+            0);
+
+        /*
+         * Reuse the native GHBA thread/stack storage. Every previous
+         * thread has already been joined before this probe starts.
+         */
+        BOOL created =
+            OSCreateThread(
+                &ghba_threads[i],
+                shim_gethostbyaddr_case_worker,
+                (int)i,
+                NULL,
+                ghba_stacks[i] +
+                    sizeof(ghba_stacks[i]),
+                sizeof(ghba_stacks[i]),
+                16,
+                OS_THREAD_ATTRIB_AFFINITY_ANY);
+
+        if (!created) {
+            probe_say(
+                "AX-GHBA %-12s OSCreateThread FAIL",
+                c->label);
+            continue;
+        }
+
+        OSSetThreadName(
+            &ghba_threads[i],
+            "AX shim gethostbyaddr");
+
+        OSResumeThread(
+            &ghba_threads[i]);
+
+        while (!atomic_load(
+                   &ghba_done)) {
+
+            if (!probe_poll())
+                return;
+
+            OSSleepTicks(
+                OSMillisecondsToTicks(10));
+        }
+
+        int thread_result = -1;
+
+        OSJoinThread(
+            &ghba_threads[i],
+            &thread_result);
+
+        probe_say(
+            "AX-GHBA %-12s JOIN thread=%d worker=%d",
+            c->label,
+            thread_result,
+            r->worker_rc);
+
+        if (r->worker_rc != 0) {
+            probe_say(
+                "AX-GHBA %-12s worker failure=%d",
+                c->label,
+                r->worker_rc);
+            continue;
+        }
+
+        probe_say(
+            "AX-GHBA %-12s ip=%s len=%u type=%d result=%08x ms=%llu",
+            c->label,
+            c->ip,
+            (unsigned)c->len,
+            c->type,
+            (unsigned)r->snap.hostent_ptr,
+            (unsigned long long)r->elapsed_ms);
+
+        probe_say(
+            "AX-GHBA %-12s HERR initial=%d seeded=%d before=%d after=%d",
+            c->label,
+            r->herr_initial,
+            r->herr_after_seed_failure,
+            r->herr_before,
+            r->herr_after);
+
+        if (!r->snap.hostent_ptr) {
+            probe_say(
+                "AX-GHBA %-12s hostent=NULL",
+                c->label);
+        } else {
+            probe_say(
+                "AX-GHBA %-12s SNAP type=%d len=%d term=%d",
+                c->label,
+                r->snap.addrtype,
+                r->snap.length,
+                r->snap.name_terminated);
+
+            probe_say(
+                "AX-GHBA %-12s PTR name=%08x aliases=%08x addrlist=%08x",
+                c->label,
+                (unsigned)r->snap.name_ptr,
+                (unsigned)r->snap.aliases_ptr,
+                (unsigned)r->snap.addrlist_ptr);
+
+            probe_say(
+                "AX-GHBA %-12s LIST alias0=%08x addr0=%08x addr1=%08x",
+                c->label,
+                (unsigned)r->snap.alias0_ptr,
+                (unsigned)r->snap.addr0_ptr,
+                (unsigned)r->snap.addr1_ptr);
+
+            probe_say(
+                "AX-GHBA %-12s NAMEHEX %02x %02x %02x %02x %02x %02x %02x %02x",
+                c->label,
+                (unsigned)(uint8_t)r->snap.name[0],
+                (unsigned)(uint8_t)r->snap.name[1],
+                (unsigned)(uint8_t)r->snap.name[2],
+                (unsigned)(uint8_t)r->snap.name[3],
+                (unsigned)(uint8_t)r->snap.name[4],
+                (unsigned)(uint8_t)r->snap.name[5],
+                (unsigned)(uint8_t)r->snap.name[6],
+                (unsigned)(uint8_t)r->snap.name[7]);
+
+            probe_say(
+                "AX-GHBA %-12s NAMEHEX %02x %02x %02x %02x %02x %02x %02x %02x",
+                c->label,
+                (unsigned)(uint8_t)r->snap.name[8],
+                (unsigned)(uint8_t)r->snap.name[9],
+                (unsigned)(uint8_t)r->snap.name[10],
+                (unsigned)(uint8_t)r->snap.name[11],
+                (unsigned)(uint8_t)r->snap.name[12],
+                (unsigned)(uint8_t)r->snap.name[13],
+                (unsigned)(uint8_t)r->snap.name[14],
+                (unsigned)(uint8_t)r->snap.name[15]);
+        }
+
+        /*
+         * Restore the title-visible h_errno value that existed before
+         * this diagnostic case.
+         */
+        h_errno =
+            r->herr_initial;
+
+        for (int n = 0;
+             n < 5;
+             n++) {
+
+            if (!probe_poll())
+                return;
+
+            OSSleepTicks(
+                OSMillisecondsToTicks(10));
+        }
+    }
+
+    probe_say(
+        "=== END AX SHIM GETHOSTBYADDR TEST ===");
+}
+
 static void run_shim_dns_abort_probe(void)
 {
     probe_say("%s", "");
@@ -2852,6 +3136,8 @@ int main(void)
     run_dns_abort_rc_matrix();
 
     run_gethostbyaddr_probe();
+
+    run_shim_gethostbyaddr_probe();
 
     run_shim_dns_abort_probe();
 
