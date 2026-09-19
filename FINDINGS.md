@@ -21,7 +21,7 @@
 
 [✓] limites négatives exactes SNDBUF/RCVBUF
 [ ] parité exacte SNDBUF / backpressure (écart résiduel à 4096)
-[ ] parité réelle RCVBUF / SO_RXDATA
+[✓] parité réelle RCVBUF / SO_RXDATA
 [✓] TCP listen / accept réel
 [✓] sendto_multi_ex
 [✓] recvfrom_multi
@@ -2335,3 +2335,51 @@ Next fix:
 - make receive-window update thresholds depend on rcv_wnd_max;
 - use delayed window-update ACK behaviour for the characterized
   RCVBUF=1 case.
+
+
+## AX TCP RCVBUF / SO_RXDATA parity validated
+
+After raising the global lwIP receive headroom and making receive-window
+update thresholds depend on the per-PCB rcv_wnd_max, the receive-pressure
+probe was repeated through AX.
+
+Confirmed path:
+
+    SO_MYADDR=192.168.2.190
+
+Observed saturation:
+
+    RCVBUF      native       AX
+
+    default     8192         8192
+    1           1            1
+    4096        4096         4096
+    8192        8192         8192
+    16384       16384        16384
+    65535       65535        65535
+
+All normal cases drained the complete 256 KiB stream and returned:
+
+    SO_RXDATA-after=0
+
+RCVBUF=1 reproduced the intentionally pathological native behaviour:
+
+    native drain before probe deadline: 67 bytes
+    AX drain before probe deadline:     57 bytes
+
+Both runs subsequently caused the PC sender to observe BrokenPipe when
+the probe closed the deliberately extremely slow connection.
+
+There are timing differences while the receive queue fills, for example
+RCVBUF=4096 reaches 4096 somewhat later on AX, but the externally
+important semantics now match:
+
+- requested RCVBUF is the real TCP receive-window limit;
+- SO_RXDATA reflects unread application-visible bytes;
+- the sender experiences TCP backpressure at that limit;
+- draining data reopens the receive window;
+- normal streams complete without data loss;
+- RXDATA returns to zero after drain.
+
+RCVBUF / SO_RXDATA real TCP behaviour is therefore considered
+functionally validated.
