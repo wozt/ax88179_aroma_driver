@@ -1739,3 +1739,38 @@ Parité retenue pour le shim AX :
 
     AX inactif :
         passthrough vers nsysnet natif
+
+
+## dns_abort_by_hname AX : parité validée
+
+Le hook AX de dns_abort_by_hname() a été implémenté selon le comportement
+natif mesuré :
+
+    AX actif :
+        return 0
+        aucune annulation du resolver lwIP
+
+    AX inactif :
+        passthrough vers nsysnet natif
+
+Validation réelle à travers FunctionPatcher :
+
+    getaddrinfo_async("www.openssl.org")
+        -> EAI_INPROGRESS (15)
+
+    dns_abort_by_hname("www.openssl.org")
+        -> 0
+
+    polling suivant
+        -> résolution terminée normalement
+        -> rc=0
+
+    dns_abort_by_hname("hostname sans requête")
+        -> 0
+
+Résultat :
+
+    [✓] dns_abort_by_hname ABI
+    [✓] code retour natif reproduit
+    [✓] comportement pending reproduit
+    [✓] comportement sans requête reproduit
