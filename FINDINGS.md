@@ -2468,3 +2468,33 @@ but these rounds are not independent because the queues were never
 drained.
 
 The next probe revision uses recvfrom() with a real source sockaddr.
+
+
+## Native UDP recvfrom EMSGSIZE confirmed after reboot
+
+The Wii U was fully rebooted and the native UDP exhaustion probe was
+repeated with the recvfrom()-based drain.
+
+Confirmed path:
+
+    SO_MYADDR=192.168.2.124
+
+The result was unchanged.
+
+Before the first traffic burst, all eight bound nonblocking UDP sockets
+returned:
+
+    recvfrom(...) = -1
+    errno=122
+    socketlasterr=12
+
+WUT's nsysnet error table maps raw error 12 to EMSGSIZE.
+
+This therefore is reproducible after a full console restart and is not
+stale socket state or an old running process.
+
+The existing successful native recvfrom_ex characterization used
+0x40-aligned receive and sockaddr buffers. The exhaustion probe did not.
+
+Buffer/address alignment is therefore the next variable isolated by the
+probe.
