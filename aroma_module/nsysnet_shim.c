@@ -24,7 +24,6 @@
  * console socket, so the worst case is the Wi-Fi behaviour we had before.
  *
  * Not covered (only usable with native sockets, not shim sockets):
- * getaddrinfo_async(_rs),
  * gethostbyaddr, netconf_*, socket_lib_init/finish. NSSL itself still
  * requires a system fd; NSSLCreateConnection is bridged by promoting an
  * AX-backed socket to its reserved native placeholder at the TLS boundary.
@@ -45,6 +44,8 @@
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include "lwip/inet.h"
+#include "lwip/dns.h"
+#include "lwip/tcpip.h"
 #include "../net/ax_net.h"
 
 /* ------------------------------------------------------------------ */
@@ -160,6 +161,7 @@ struct nsn_sendto_multi_ex_buffers {
 #define NSN_EAI_MEMORY     6
 #define NSN_EAI_NONAME     8
 #define NSN_EAI_SERVICE    9
+#define NSN_EAI_INPROGRESS 15
 #define NSN_NI_NAMEREQD    0x0004
 
 extern int h_errno;
@@ -2713,66 +2715,629 @@ static int ai_flags_to_lwip(int f)
     return r;
 }
 
-DECL_FUNCTION(int, getaddrinfo, const char *node, const char *service,
-              const struct nsn_addrinfo *hints, struct nsn_addrinfo **res)
+static int shim_getaddrinfo_sync(
+    const char *node,
+    const char *service,
+    const struct nsn_addrinfo *hints,
+    struct nsn_addrinfo **res)
 {
-    if (!shim_accepts() || !ax_net_stack_ready()) return real_getaddrinfo(node, service, hints, res);
-    if (!res) return NSN_EAI_FAIL;
+    if (!res)
+        return NSN_EAI_FAIL;
+
     *res = NULL;
 
-    struct addrinfo lh, *lph = NULL;
+    struct addrinfo lh;
+    struct addrinfo *lph = NULL;
+
     if (hints) {
         memset(&lh, 0, sizeof(lh));
-        lh.ai_flags = ai_flags_to_lwip(hints->ai_flags);
-        lh.ai_family = hints->ai_family;
-        lh.ai_socktype = hints->ai_socktype;
-        lh.ai_protocol = hints->ai_protocol;
+
+        lh.ai_flags =
+            ai_flags_to_lwip(hints->ai_flags);
+
+        lh.ai_family =
+            hints->ai_family;
+
+        lh.ai_socktype =
+            hints->ai_socktype;
+
+        lh.ai_protocol =
+            hints->ai_protocol;
+
         lph = &lh;
     }
-    const char *resolved_node = dns_rewrite_name(node);
+
+    const char *resolved_node =
+        dns_rewrite_name(node);
 
     struct addrinfo *lres = NULL;
-    int err = lwip_getaddrinfo(resolved_node, service, lph, &lres);
-    if (err != 0) return eai_to_nsn(err);
 
-    /* Convert the list: wut's addrinfo swaps ai_addr/ai_canonname and its
-     * sockaddr has no length byte. One allocation per node. */
-    struct nsn_addrinfo *head = NULL, **tail = &head;
-    for (struct addrinfo *la = lres; la; la = la->ai_next) {
-        size_t canonlen = la->ai_canonname ? strlen(la->ai_canonname) + 1 : 0;
-        struct nsn_addrinfo *na = malloc(sizeof(*na) + sizeof(struct nsn_sockaddr_in) + canonlen);
-        if (!na) { err = NSN_EAI_MEMORY; goto fail; }
+    int err =
+        lwip_getaddrinfo(
+            resolved_node,
+            service,
+            lph,
+            &lres);
+
+    if (err != 0)
+        return eai_to_nsn(err);
+
+    /*
+     * Convert lwIP addrinfo to the Wii U nsysnet ABI.
+     */
+    struct nsn_addrinfo *head = NULL;
+    struct nsn_addrinfo **tail = &head;
+
+    for (struct addrinfo *la = lres;
+         la;
+         la = la->ai_next) {
+
+        size_t canonlen =
+            la->ai_canonname
+                ? strlen(la->ai_canonname) + 1
+                : 0;
+
+        struct nsn_addrinfo *na =
+            malloc(
+                sizeof(*na) +
+                sizeof(struct nsn_sockaddr_in) +
+                canonlen);
+
+        if (!na) {
+            err = NSN_EAI_MEMORY;
+            goto fail;
+        }
+
         na->ai_flags = la->ai_flags;
         na->ai_family = la->ai_family;
         na->ai_socktype = la->ai_socktype;
         na->ai_protocol = la->ai_protocol;
         na->ai_next = NULL;
-        char *storage = (char *)(na + 1);
-        na->ai_addr = (struct nsn_sockaddr *)storage;
-        sockaddr_to_nsn(na->ai_addr, &na->ai_addrlen, la->ai_addr, 16);
-        storage += sizeof(struct nsn_sockaddr_in);
+
+        char *storage =
+            (char *)(na + 1);
+
+        na->ai_addr =
+            (struct nsn_sockaddr *)storage;
+
+        sockaddr_to_nsn(
+            na->ai_addr,
+            &na->ai_addrlen,
+            la->ai_addr,
+            16);
+
+        storage +=
+            sizeof(struct nsn_sockaddr_in);
+
         if (canonlen) {
-            memcpy(storage, la->ai_canonname, canonlen);
-            na->ai_canonname = storage;
+            memcpy(
+                storage,
+                la->ai_canonname,
+                canonlen);
+
+            na->ai_canonname =
+                storage;
         } else {
-            na->ai_canonname = NULL;
+            na->ai_canonname =
+                NULL;
         }
+
         *tail = na;
         tail = &na->ai_next;
     }
-    if (!ai_remember(head)) { err = NSN_EAI_MEMORY; goto fail; }
+
+    if (!ai_remember(head)) {
+        err = NSN_EAI_MEMORY;
+        goto fail;
+    }
+
     lwip_freeaddrinfo(lres);
+
     *res = head;
     return 0;
 
 fail:
     lwip_freeaddrinfo(lres);
+
     while (head) {
-        struct nsn_addrinfo *next = head->ai_next;
+        struct nsn_addrinfo *next =
+            head->ai_next;
+
         free(head);
         head = next;
     }
+
     return err;
+}
+
+DECL_FUNCTION(int, getaddrinfo,
+              const char *node,
+              const char *service,
+              const struct nsn_addrinfo *hints,
+              struct nsn_addrinfo **res)
+{
+    if (!shim_accepts() ||
+        !ax_net_stack_ready()) {
+
+        return real_getaddrinfo(
+            node,
+            service,
+            hints,
+            res);
+    }
+
+    return shim_getaddrinfo_sync(
+        node,
+        service,
+        hints,
+        res);
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Native-style asynchronous getaddrinfo                              */
+
+/*
+ * Native nsysnet behaviour measured on hardware:
+ *
+ *   uncached DNS:
+ *       first call    -> EAI_INPROGRESS
+ *       later polls   -> EAI_INPROGRESS
+ *       completed     -> 0 + addrinfo
+ *
+ * Numeric/cached names may return 0 immediately.
+ *
+ * The async state is keyed by hostname. The result itself is not kept
+ * here: lwIP puts the completed DNS answer in its DNS cache, so when a
+ * poll observes READY, shim_getaddrinfo_sync() consumes that cached
+ * answer and creates the normal nsysnet-compatible addrinfo list.
+ */
+
+#define ASYNC_DNS_MAX 8
+#define ASYNC_DNS_TOKEN_INDEX_BITS 4
+#define ASYNC_DNS_TOKEN_INDEX_MASK 0x0fu
+#define ASYNC_DNS_TOKEN_TICKET_MASK 0x0fffffffu
+
+enum async_dns_state {
+    ASYNC_DNS_FREE = 0,
+    ASYNC_DNS_PENDING,
+    ASYNC_DNS_READY,
+    ASYNC_DNS_FAILED,
+    ASYNC_DNS_CLAIMED
+};
+
+struct async_dns_slot {
+    atomic_int state;
+    atomic_uint ticket;
+
+    char name[DNS_MAX_NAME_LENGTH + 1];
+};
+
+static struct async_dns_slot async_dns_slots[ASYNC_DNS_MAX];
+
+static atomic_uint async_dns_ticket_counter = 1;
+
+static atomic_flag async_dns_table_lock =
+    ATOMIC_FLAG_INIT;
+
+static void async_dns_lock(void)
+{
+    while (atomic_flag_test_and_set_explicit(
+               &async_dns_table_lock,
+               memory_order_acquire)) {
+        OSYieldThread();
+    }
+}
+
+static void async_dns_unlock(void)
+{
+    atomic_flag_clear_explicit(
+        &async_dns_table_lock,
+        memory_order_release);
+}
+
+static unsigned async_dns_new_ticket(void)
+{
+    unsigned ticket =
+        atomic_fetch_add(
+            &async_dns_ticket_counter,
+            1);
+
+    ticket &=
+        ASYNC_DNS_TOKEN_TICKET_MASK;
+
+    /*
+     * Zero is reserved as "no live request".
+     * Wrap would require hundreds of millions of queries.
+     */
+    if (!ticket)
+        ticket = 1;
+
+    return ticket;
+}
+
+static int async_dns_find_locked(
+    const char *name)
+{
+    for (int i = 0;
+         i < ASYNC_DNS_MAX;
+         i++) {
+
+        int state =
+            atomic_load(
+                &async_dns_slots[i].state);
+
+        if (state == ASYNC_DNS_FREE ||
+            state == ASYNC_DNS_CLAIMED)
+            continue;
+
+        if (strcmp(
+                async_dns_slots[i].name,
+                name) == 0)
+            return i;
+    }
+
+    return -1;
+}
+
+static int async_dns_claim_locked(
+    const char *name,
+    uintptr_t *token_out)
+{
+    size_t len = strlen(name);
+
+    if (len >= sizeof(async_dns_slots[0].name))
+        return -1;
+
+    for (int i = 0;
+         i < ASYNC_DNS_MAX;
+         i++) {
+
+        int expected =
+            ASYNC_DNS_FREE;
+
+        if (!atomic_compare_exchange_strong(
+                &async_dns_slots[i].state,
+                &expected,
+                ASYNC_DNS_CLAIMED))
+            continue;
+
+        unsigned ticket =
+            async_dns_new_ticket();
+
+        atomic_store(
+            &async_dns_slots[i].ticket,
+            ticket);
+
+        memcpy(
+            async_dns_slots[i].name,
+            name,
+            len + 1);
+
+        /*
+         * PENDING is published only after name/ticket are complete.
+         */
+        atomic_store(
+            &async_dns_slots[i].state,
+            ASYNC_DNS_PENDING);
+
+        if (token_out) {
+            *token_out =
+                ((uintptr_t)ticket
+                    << ASYNC_DNS_TOKEN_INDEX_BITS) |
+                (uintptr_t)(i + 1);
+        }
+
+        return i;
+    }
+
+    return -1;
+}
+
+static void async_dns_release_if_ticket(
+    int slot,
+    unsigned ticket)
+{
+    if (slot < 0 ||
+        slot >= ASYNC_DNS_MAX)
+        return;
+
+    if (atomic_load(
+            &async_dns_slots[slot].ticket) !=
+        ticket)
+        return;
+
+    atomic_store(
+        &async_dns_slots[slot].state,
+        ASYNC_DNS_FREE);
+
+    atomic_store(
+        &async_dns_slots[slot].ticket,
+        0);
+}
+
+static void async_dns_found(
+    const char *name,
+    const ip_addr_t *ipaddr,
+    void *callback_arg)
+{
+    (void)name;
+
+    uintptr_t token =
+        (uintptr_t)callback_arg;
+
+    unsigned raw_index =
+        (unsigned)(
+            token &
+            ASYNC_DNS_TOKEN_INDEX_MASK);
+
+    if (raw_index == 0 ||
+        raw_index > ASYNC_DNS_MAX)
+        return;
+
+    int slot =
+        (int)raw_index - 1;
+
+    unsigned ticket =
+        (unsigned)(
+            token >>
+            ASYNC_DNS_TOKEN_INDEX_BITS);
+
+    if (atomic_load(
+            &async_dns_slots[slot].ticket) !=
+        ticket)
+        return;
+
+    int expected =
+        ASYNC_DNS_PENDING;
+
+    atomic_compare_exchange_strong(
+        &async_dns_slots[slot].state,
+        &expected,
+        ipaddr
+            ? ASYNC_DNS_READY
+            : ASYNC_DNS_FAILED);
+}
+
+static int async_dns_raw_error_to_nsn(
+    err_t err)
+{
+    if (err == ERR_MEM)
+        return NSN_EAI_MEMORY;
+
+    return NSN_EAI_FAIL;
+}
+
+static int shim_getaddrinfo_async(
+    const char *node,
+    const char *service,
+    const struct nsn_addrinfo *hints,
+    struct nsn_addrinfo **res)
+{
+    if (!res)
+        return NSN_EAI_FAIL;
+
+    *res = NULL;
+
+    /*
+     * No hostname means no asynchronous DNS work is required.
+     * Numeric/local/cache hits are also handled synchronously below.
+     */
+    if (!node) {
+        return shim_getaddrinfo_sync(
+            node,
+            service,
+            hints,
+            res);
+    }
+
+    const char *resolved_node =
+        dns_rewrite_name(node);
+
+    if (!resolved_node ||
+        !resolved_node[0])
+        return NSN_EAI_NONAME;
+
+    /*
+     * First check whether this hostname already has an async request.
+     */
+    async_dns_lock();
+
+    int existing =
+        async_dns_find_locked(
+            resolved_node);
+
+    if (existing >= 0) {
+        int state =
+            atomic_load(
+                &async_dns_slots[existing].state);
+
+        if (state == ASYNC_DNS_PENDING) {
+            async_dns_unlock();
+            return NSN_EAI_INPROGRESS;
+        }
+
+        /*
+         * The DNS callback has already run. Release our bookkeeping
+         * before creating the addrinfo result.
+         *
+         * The successful answer is now in lwIP's DNS cache.
+         */
+        atomic_store(
+            &async_dns_slots[existing].state,
+            ASYNC_DNS_FREE);
+
+        atomic_store(
+            &async_dns_slots[existing].ticket,
+            0);
+
+        async_dns_unlock();
+
+        if (state == ASYNC_DNS_FAILED)
+            return NSN_EAI_NONAME;
+
+        return shim_getaddrinfo_sync(
+            node,
+            service,
+            hints,
+            res);
+    }
+
+    uintptr_t token = 0;
+
+    int slot =
+        async_dns_claim_locked(
+            resolved_node,
+            &token);
+
+    async_dns_unlock();
+
+    if (slot < 0)
+        return NSN_EAI_MEMORY;
+
+    unsigned ticket =
+        (unsigned)(
+            token >>
+            ASYNC_DNS_TOKEN_INDEX_BITS);
+
+    ip_addr_t addr;
+
+    /*
+     * dns_gethostbyname() is lwIP's raw non-blocking DNS API.
+     * With core locking enabled it can safely be entered from the
+     * title's thread while the actual DNS transaction remains async.
+     */
+    LOCK_TCPIP_CORE();
+
+    err_t err =
+        dns_gethostbyname(
+            resolved_node,
+            &addr,
+            async_dns_found,
+            (void *)token);
+
+    UNLOCK_TCPIP_CORE();
+
+    if (err == ERR_INPROGRESS)
+        return NSN_EAI_INPROGRESS;
+
+    /*
+     * Numeric address, localhost or DNS-cache hit: native nsysnet also
+     * returns success immediately rather than EAI_INPROGRESS.
+     */
+    if (err == ERR_OK) {
+        async_dns_release_if_ticket(
+            slot,
+            ticket);
+
+        return shim_getaddrinfo_sync(
+            node,
+            service,
+            hints,
+            res);
+    }
+
+    async_dns_release_if_ticket(
+        slot,
+        ticket);
+
+    return async_dns_raw_error_to_nsn(
+        err);
+}
+
+DECL_FUNCTION(int, getaddrinfo_rs,
+              const char *node,
+              const char *service,
+              const struct nsn_addrinfo *hints,
+              struct nsn_addrinfo **res)
+{
+    if (!shim_accepts() ||
+        !ax_net_stack_ready()) {
+
+        return real_getaddrinfo_rs(
+            node,
+            service,
+            hints,
+            res);
+    }
+
+    return shim_getaddrinfo_sync(
+        node,
+        service,
+        hints,
+        res);
+}
+
+DECL_FUNCTION(int, getaddrinfo_async,
+              const char *node,
+              const char *service,
+              const struct nsn_addrinfo *hints,
+              struct nsn_addrinfo **res)
+{
+    if (!shim_accepts() ||
+        !ax_net_stack_ready()) {
+
+        return real_getaddrinfo_async(
+            node,
+            service,
+            hints,
+            res);
+    }
+
+    return shim_getaddrinfo_async(
+        node,
+        service,
+        hints,
+        res);
+}
+
+DECL_FUNCTION(int, getaddrinfo_async_rs,
+              const char *node,
+              const char *service,
+              const struct nsn_addrinfo *hints,
+              struct nsn_addrinfo **res)
+{
+    if (!shim_accepts() ||
+        !ax_net_stack_ready()) {
+
+        return real_getaddrinfo_async_rs(
+            node,
+            service,
+            hints,
+            res);
+    }
+
+    return shim_getaddrinfo_async(
+        node,
+        service,
+        hints,
+        res);
+}
+
+static void async_dns_reset_all(void)
+{
+    /*
+     * ticket=0 invalidates callbacks from a previous title generation.
+     * A late callback therefore cannot complete a newly reused slot.
+     */
+    async_dns_lock();
+
+    for (int i = 0;
+         i < ASYNC_DNS_MAX;
+         i++) {
+
+        atomic_store(
+            &async_dns_slots[i].ticket,
+            0);
+
+        atomic_store(
+            &async_dns_slots[i].state,
+            ASYNC_DNS_FREE);
+
+        async_dns_slots[i].name[0] = 0;
+    }
+
+    async_dns_unlock();
 }
 
 DECL_FUNCTION(void, freeaddrinfo, struct nsn_addrinfo *res)
@@ -2933,6 +3498,9 @@ int nsysnet_shim_install(void)
     if (!atomic_load(&system_dns)) {
         SHIM_PATCH(gethostbyname);
         SHIM_PATCH(getaddrinfo);
+        SHIM_PATCH(getaddrinfo_rs);
+        SHIM_PATCH(getaddrinfo_async);
+        SHIM_PATCH(getaddrinfo_async_rs);
         SHIM_PATCH(freeaddrinfo);
         SHIM_PATCH(getnameinfo);
         SHIM_PATCH(get_h_errno);
@@ -2965,6 +3533,7 @@ void nsysnet_shim_begin_title(void) {
     atomic_store(&open_mask, 0);
     atomic_store(&ax_activity_pending, 0);
     compat_state_reset_all();
+    async_dns_reset_all();
 
     for (int i=0; i<AI_OWNED_MAX; ++i) atomic_store(&ai_owned[i], NULL);
 }
