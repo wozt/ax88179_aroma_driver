@@ -1570,3 +1570,63 @@ the externally visible limit.
 
 No progressive socket resource leak was observed across repeated
 exhaustion/reclamation cycles.
+
+
+## LWIP_SOCKET_OFFSET=0 regression run
+
+After increasing the lwIP socket pools and changing:
+
+    LWIP_SOCKET_OFFSET=16 -> 0
+
+the ordinary shim probe was run through AX.
+
+Validated results:
+
+    TCP echo 32 PASS
+    TCP echo 504 PASS
+    TCP echo 1024 PASS
+    TCP echo 1400 PASS
+
+    UDP echo 32 PASS
+    UDP echo 504 PASS
+    UDP echo 1024 PASS
+    UDP echo 1400 PASS
+
+    TCP concurrent rounds=32/32
+    UDP concurrent rounds=32/32
+    AXCONCURRENT result=PASS
+
+This confirms that ordinary TCP/UDP traffic and concurrent socket use
+still work with private lwIP descriptors in the 0..31 range.
+
+However the run ended with:
+
+    AXPROBE release=-5
+
+Investigation showed that the probe harness predates automatic global
+title routing.
+
+The socket named `native_fd` was created only before
+`AXShimBeginProbe()`, but by that time the production shim was already
+installed and accepting AX sockets. Therefore that descriptor was no
+longer guaranteed to be native.
+
+Consequently the printed:
+
+    native socket + mixed poll: PASS
+
+must NOT be considered a valid native/AX coexistence validation for this
+run.
+
+`AXShimEndProbe()` also used the old assumption that open_mask must be
+zero, although automatic routing means module/title AX sockets may
+already exist before BeginProbe.
+
+The harness must be updated to:
+
+1. create its native coexistence socket before the module worker can
+   install the shim;
+2. close that socket before EndProbe;
+3. make EndProbe compare against resources which already existed when
+   BeginProbe started rather than requiring global open_mask == 0;
+4. print the coexistence socket's actual local address.
