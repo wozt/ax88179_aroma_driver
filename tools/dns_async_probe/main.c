@@ -2055,6 +2055,12 @@ struct ghba_snapshot {
     uintptr_t aliases_ptr;
     uintptr_t addrlist_ptr;
 
+    uintptr_t alias0_ptr;
+
+    uintptr_t addr0_ptr;
+    uintptr_t addr1_ptr;
+    uint8_t addr0[4];
+
     int addrtype;
     int length;
 
@@ -2098,6 +2104,35 @@ static void snapshot_native_hostent(
 
     out->length =
         h->h_length;
+
+    /*
+     * Snapshot list contents while native resolver storage is still
+     * valid. No logging is performed here.
+     */
+    if (h->h_aliases) {
+        out->alias0_ptr =
+            (uintptr_t)h->h_aliases[0];
+    }
+
+    if (h->h_addr_list) {
+        out->addr0_ptr =
+            (uintptr_t)h->h_addr_list[0];
+
+        if (h->h_addr_list[0]) {
+            if (h->h_length == 4) {
+                memcpy(
+                    out->addr0,
+                    h->h_addr_list[0],
+                    4);
+            }
+
+            /*
+             * hostent address lists are NULL terminated.
+             */
+            out->addr1_ptr =
+                (uintptr_t)h->h_addr_list[1];
+        }
+    }
 
     if (h->h_name) {
         volatile const char *src =
@@ -2378,6 +2413,21 @@ static void run_gethostbyaddr_probe(void)
                 (unsigned)r->snap.name_ptr,
                 (unsigned)r->snap.aliases_ptr,
                 (unsigned)r->snap.addrlist_ptr);
+
+            probe_say(
+                "GHBA %-12s LIST alias0=%08x addr0=%08x addr1=%08x",
+                c->label,
+                (unsigned)r->snap.alias0_ptr,
+                (unsigned)r->snap.addr0_ptr,
+                (unsigned)r->snap.addr1_ptr);
+
+            probe_say(
+                "GHBA %-12s ADDRHEX %02x %02x %02x %02x",
+                c->label,
+                (unsigned)r->snap.addr0[0],
+                (unsigned)r->snap.addr0[1],
+                (unsigned)r->snap.addr0[2],
+                (unsigned)r->snap.addr0[3]);
 
             /*
              * No %s needed yet. These bytes are from our own global
