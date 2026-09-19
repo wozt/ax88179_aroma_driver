@@ -2426,3 +2426,45 @@ This run is recorded as an inconclusive probe-harness result, not as a
 native networking failure.
 
 The next run will use recv(..., 0) on the already nonblocking sockets.
+
+
+## Native unconnected UDP recv() behaviour during exhaustion probe
+
+A second native UDP exhaustion run removed MSG_DONTWAIT from recv(),
+because each socket was already configured O_NONBLOCK.
+
+The behaviour did not change.
+
+Before the first traffic burst, every bound unconnected UDP socket
+already returned:
+
+    recv(fd, ..., 0) = -1
+    errno=122
+    socketlasterr=12
+
+In the characterized nsysnet error mapping:
+
+    nerr=12 = EMSGSIZE
+
+Because this happens before any test datagram has been queued, the error
+cannot be caused by a datagram larger than the probe's 2048-byte receive
+buffer.
+
+The same behaviour continued after the 1400-byte UDP bursts.
+
+Therefore recv() is not suitable for draining these native bound,
+unconnected UDP sockets in this probe.
+
+The exhaustion measurement remains inconclusive because no queued
+datagrams were consumed.
+
+The queued-data observations themselves are retained:
+
+    round 1 SO_RXDATA ~= 65136 per socket
+    round 2 SO_RXDATA ~= 65274 per socket
+    round 3 SO_RXDATA ~= 65412 per socket
+
+but these rounds are not independent because the queues were never
+drained.
+
+The next probe revision uses recvfrom() with a real source sockaddr.
