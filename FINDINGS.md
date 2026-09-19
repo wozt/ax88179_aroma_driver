@@ -1381,3 +1381,64 @@ La différence async est interne au resolver et est commandée par r7.
 Il reste à caractériser le comportement observable : code retour,
 blocage éventuel, résultat immédiat/différé et comportement des variantes
 _rs.
+
+
+## DNS async : comportement natif EAI_INPROGRESS
+
+Les quatre variantes getaddrinfo ont été appelées avec leur ABI native
+confirmée à quatre arguments.
+
+Résolution numérique :
+
+    getaddrinfo("127.0.0.1")          -> rc=0, 0 ms
+    getaddrinfo_async("127.0.0.1")    -> rc=0, 0 ms
+    getaddrinfo_rs("127.0.0.1")       -> rc=0, 0 ms
+    getaddrinfo_async_rs("127.0.0.1") -> rc=0, 0 ms
+
+Toutes retournent immédiatement un addrinfo IPv4 valide :
+
+    127.0.0.1:80
+    family=2
+    socktype=1
+    protocol=6
+
+Résolution DNS réelle :
+
+    getaddrinfo("example.com")
+        rc=0
+        durée=41 ms
+        résultat immédiat valide
+
+    getaddrinfo_rs("example.org")
+        rc=0
+        durée=23 ms
+        résultat immédiat valide
+
+En revanche :
+
+    getaddrinfo_async("example.net")
+        rc=15 (EAI_INPROGRESS)
+        durée=0 ms
+        res=NULL
+
+    getaddrinfo_async_rs("iana.org")
+        rc=15 (EAI_INPROGRESS)
+        durée=0 ms
+        res=NULL
+
+Le pointeur res a été conservé dans une zone globale pendant 2 secondes.
+
+Après 2 secondes :
+
+    res reste NULL
+
+Conclusion :
+
+La variante async démarre une résolution en arrière-plan et retourne
+EAI_INPROGRESS, mais elle ne complète pas ultérieurement en écrivant
+directement dans le struct addrinfo **res fourni au premier appel.
+
+Il reste à déterminer comment le résultat est récupéré. L'hypothèse
+suivante à tester est que l'appelant doit rappeler getaddrinfo_async
+avec le même hostname jusqu'à ce que la fonction retourne autre chose
+que EAI_INPROGRESS.
