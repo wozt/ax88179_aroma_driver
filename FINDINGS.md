@@ -1829,3 +1829,70 @@ Note infrastructure probe :
     Il appelle draw()/SDL et modifie l'état UI global. Les résultats
     d'un worker doivent être stockés puis affichés après OSJoinThread()
     depuis le thread principal.
+
+
+## gethostbyaddr natif : structure hostent complète
+
+Le comportement IPv4 de gethostbyaddr() a été caractérisé sur matériel.
+
+Résolutions positives :
+
+    8.8.8.8
+        -> dns.google
+
+    1.1.1.1
+        -> one.one.one.one
+
+Structure hostent retournée :
+
+    h_name
+        contient le nom PTR résolu
+
+    h_aliases
+        pointeur valide
+        h_aliases[0] == NULL
+
+    h_addr_list
+        pointeur valide
+        h_addr_list[0] == NULL
+
+    h_addrtype
+        AF_INET (2)
+
+    h_length
+        4
+
+Le natif ne remet donc PAS l'adresse IPv4 demandée dans h_addr_list.
+
+Les buffers sont statiques/réutilisés :
+
+    même pointeur hostent entre appels
+    même buffer h_name
+    même buffer h_aliases
+    même buffer h_addr_list
+
+Cas négatifs mesurés :
+
+    192.0.2.1 sans PTR
+        -> NULL
+
+    len = 3
+        -> NULL
+
+    family != AF_INET
+        -> NULL
+
+Dans tous les cas actuellement mesurés :
+
+    h_errno avant = 0
+    h_errno après = 0
+
+Il reste à déterminer si gethostbyaddr() force h_errno à zéro ou le
+laisse simplement inchangé lorsqu'une valeur non nulle existait avant
+l'appel.
+
+Note probe :
+
+    probe_say() ne doit pas être appelé depuis un worker secondaire.
+    Il met à jour l'UI/SDL. Les workers doivent enregistrer leurs
+    résultats puis laisser le thread principal les afficher après join.
