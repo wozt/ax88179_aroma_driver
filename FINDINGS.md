@@ -1630,3 +1630,77 @@ The harness must be updated to:
 3. make EndProbe compare against resources which already existed when
    BeginProbe started rather than requiring global open_mask == 0;
 4. print the coexistence socket's actual local address.
+
+
+## Native/AX coexistence and fd remapping final validation
+
+The shim probe was corrected to create its deliberately native socket
+before the AX worker installs the production hooks, and probe resource
+ownership is now compared against the state which existed at
+AXShimBeginProbe().
+
+Final run:
+
+    early native candidate fd=3
+
+Ordinary shim TCP socket:
+
+    local=192.168.2.190
+    32 bytes   PASS
+    504 bytes  PASS
+    1024 bytes PASS
+    1400 bytes PASS
+
+Ordinary shim UDP socket:
+
+    local=192.168.2.190
+    32 bytes   PASS
+    504 bytes  PASS
+    1024 bytes PASS
+    1400 bytes PASS
+
+The coexistence socket was independently proven to remain on the native
+Wii U interface:
+
+    AXCONCURRENT coexist socket local=192.168.2.124:2210
+
+while the concurrent shim sockets used:
+
+    AX88179 = 192.168.2.190
+
+A poll containing both native and AX-backed descriptors succeeded:
+
+    AXCONCURRENT native socket + mixed poll: PASS
+
+Concurrent workload:
+
+    TCP rounds=32/32 bytes=23680 errno=0
+    UDP rounds=32/32 bytes=23680 errno=0
+    AXCONCURRENT result=PASS
+
+Probe teardown:
+
+    AXPROBE release=0
+
+This confirms that no resources created by the diagnostic remained
+owned when AXShimEndProbe() was called.
+
+### Conclusion
+
+LWIP_SOCKET_OFFSET=0 is validated with the shim's explicit
+public-fd -> lwIP-fd mapping.
+
+The following are now jointly validated:
+
+- native public fd space 4..31
+- native-compatible 28 socket exhaustion limit
+- EMFILE/socketlasterr=51 at the 29th public socket
+- internal lwIP descriptors starting at zero
+- TCP and UDP operation
+- mixed native/AX poll
+- simultaneous native and AX routing in one title
+- concurrent TCP/UDP activity
+- clean probe resource reclamation
+
+The earlier `release=-5` and supposed native coexistence result were
+probe-harness issues and are superseded by this corrected validation.
