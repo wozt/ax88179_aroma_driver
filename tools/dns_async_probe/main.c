@@ -839,6 +839,196 @@ static void run_one_shim_poll(
     }
 }
 
+
+typedef void (*raw_clear_resolver_cache_fn)(void);
+
+static void run_clear_resolver_cache_probe(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== NATIVE CLEAR RESOLVER CACHE TEST ===");
+
+    raw_getaddrinfo_fn sync_fn =
+        (raw_getaddrinfo_fn)find_export_addr(
+            "getaddrinfo");
+
+    raw_getaddrinfo_fn async_fn =
+        (raw_getaddrinfo_fn)find_export_addr(
+            "getaddrinfo_async");
+
+    raw_freeaddrinfo_fn native_free =
+        (raw_freeaddrinfo_fn)find_export_addr(
+            "freeaddrinfo");
+
+    raw_clear_resolver_cache_fn clear_fn =
+        (raw_clear_resolver_cache_fn)find_export_addr(
+            "clear_resolver_cache");
+
+    if (!sync_fn ||
+        !async_fn ||
+        !native_free ||
+        !clear_fn) {
+
+        probe_say(
+            "CLEAR-CACHE missing native export");
+        return;
+    }
+
+    const char *host =
+        "www.openbsd.org";
+
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    struct nsn_addrinfo *res = NULL;
+
+    /*
+     * Step 1:
+     * Populate the native resolver cache synchronously.
+     */
+    OSTime begin =
+        OSGetTime();
+
+    int rc =
+        sync_fn(
+            host,
+            "80",
+            &hints,
+            &res);
+
+    uint64_t populate_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    probe_say(
+        "CLEAR-CACHE populate rc=%d ms=%llu res=%08x",
+        rc,
+        (unsigned long long)populate_ms,
+        (unsigned)(uintptr_t)res);
+
+    if (rc != 0 || !res) {
+        probe_say(
+            "CLEAR-CACHE populate FAIL");
+        return;
+    }
+
+    native_free(res);
+    res = NULL;
+
+    /*
+     * Step 2:
+     * Prove the hostname is now cached.
+     *
+     * Native async getaddrinfo should return rc=0 immediately.
+     */
+    begin =
+        OSGetTime();
+
+    rc =
+        async_fn(
+            host,
+            "80",
+            &hints,
+            &res);
+
+    uint64_t cached_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    probe_say(
+        "CLEAR-CACHE before clear rc=%d ms=%llu res=%08x",
+        rc,
+        (unsigned long long)cached_ms,
+        (unsigned)(uintptr_t)res);
+
+    if (rc == 0 && res) {
+        native_free(res);
+        res = NULL;
+    }
+
+    /*
+     * Step 3:
+     * Native cache flush.
+     */
+    clear_fn();
+
+    probe_say(
+        "CLEAR-CACHE clear_resolver_cache returned");
+
+    /*
+     * Step 4:
+     * The same hostname must no longer be immediately available.
+     */
+    begin =
+        OSGetTime();
+
+    rc =
+        async_fn(
+            host,
+            "80",
+            &hints,
+            &res);
+
+    uint64_t after_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    probe_say(
+        "CLEAR-CACHE after clear initial=%d ms=%llu res=%08x",
+        rc,
+        (unsigned long long)after_ms,
+        (unsigned)(uintptr_t)res);
+
+    int initial_after_clear =
+        rc;
+
+    int attempts = 1;
+
+    OSTime deadline =
+        OSGetTime() +
+        OSMillisecondsToTicks(5000);
+
+    while (rc == NSN_EAI_INPROGRESS &&
+           OSGetTime() < deadline) {
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+
+        res = NULL;
+
+        rc =
+            async_fn(
+                host,
+                "80",
+                &hints,
+                &res);
+
+        attempts++;
+    }
+
+    uint64_t refill_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    probe_say(
+        "CLEAR-CACHE refill initial=%d final=%d attempts=%d elapsed=%llu ms res=%08x",
+        initial_after_clear,
+        rc,
+        attempts,
+        (unsigned long long)refill_ms,
+        (unsigned)(uintptr_t)res);
+
+    if (rc == 0 && res)
+        native_free(res);
+
+    probe_say(
+        "=== END NATIVE CLEAR RESOLVER CACHE TEST ===");
+}
+
 static void run_shim_dns_probe(void)
 {
     probe_say("%s", "");
@@ -1054,6 +1244,8 @@ int main(void)
     run_behavior_probe();
 
     run_async_poll_probe();
+
+    run_clear_resolver_cache_probe();
 
     run_shim_dns_probe();
 
