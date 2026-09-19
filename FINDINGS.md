@@ -2899,3 +2899,40 @@ The next experiment lowers tcpip thread priority to Coreinit 17, one
 level below the existing AX worker at priority 16.
 
 No USB API or queue capacity is changed in this experiment.
+
+
+## Lowering tcpip priority hurts AX RX throughput
+
+The tcpip thread was moved from Coreinit priority 5 to priority 17,
+one level below the AX/UHS worker at priority 16.
+
+The same pacing matrix regressed substantially:
+
+    ~146.2 Mbit/s:
+        40 packets / 56000 bytes
+
+    ~42.1 Mbit/s:
+        216 packets / 302400 bytes
+
+    ~17.4 Mbit/s:
+        368 packets / 515200 bytes
+
+Recovery remained correct:
+
+    sockets=8/8
+    packets=24/24
+
+With the previous tcpip priority 5 build the corresponding results were:
+
+    ~145 Mbit/s: 91 packets
+    ~42 Mbit/s:  368 packets
+    ~17 Mbit/s:  368 packets
+
+Therefore deliberately placing the tcpip consumer below the USB worker
+is counterproductive. The asynchronous tcpip mailbox must still be
+serviced promptly.
+
+TCPIP_THREAD_PRIO is restored to 1, which maps to Coreinit priority 5.
+
+The remaining high-rate loss is pursued in the UHS receive pipeline
+rather than through further lwIP scheduling changes.
