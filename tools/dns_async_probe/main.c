@@ -27,6 +27,7 @@ static struct export_desc exports[] = {
     { "getaddrinfo_async_rs", NULL },
     { "getaddrinfo_rs",       NULL },
     { "gethostbyaddr",        NULL },
+    { "gethostbyname",        NULL },
     { "get_h_errno",          NULL },
     { "dns_abort_by_hname",   NULL },
     { "clear_resolver_cache", NULL },
@@ -2033,6 +2034,9 @@ typedef struct hostent *(*raw_gethostbyaddr_fn)(
 
 typedef int *(*raw_get_h_errno_fn)(void);
 
+typedef struct hostent *(*raw_gethostbyname_fn)(
+    const char *name);
+
 struct ghba_case {
     const char *label;
     const char *ip;
@@ -2188,6 +2192,8 @@ static atomic_int ghba_done;
 struct ghba_result {
     int worker_rc;
 
+    int herr_initial;
+    int herr_after_seed_failure;
     int herr_before;
     int herr_after;
 
@@ -2228,7 +2234,11 @@ static int gethostbyaddr_case_worker(
         (raw_get_h_errno_fn)find_export_addr(
             "get_h_errno");
 
-    if (!ghba || !getherr) {
+    raw_gethostbyname_fn ghbn =
+        (raw_gethostbyname_fn)find_export_addr(
+            "gethostbyname");
+
+    if (!ghba || !getherr || !ghbn) {
         r->worker_rc = -1;
         atomic_store(&ghba_done, 1);
         return -1;
@@ -2254,9 +2264,23 @@ static int gethostbyaddr_case_worker(
      * probe_say() updates the on-screen UI and is not safe from a
      * secondary thread.
      */
-    r->herr_before =
+    r->herr_initial =
         get_native_h_errno(
             getherr);
+
+    /*
+     * Seed h_errno through a legitimate native resolver failure.
+     * Do not write to native resolver state ourselves.
+     */
+    (void)ghbn(
+        "ax88179-ghba-herrno-seed.invalid");
+
+    r->herr_after_seed_failure =
+        get_native_h_errno(
+            getherr);
+
+    r->herr_before =
+        r->herr_after_seed_failure;
 
     OSTime begin =
         OSGetTime();
@@ -2385,15 +2409,21 @@ static void run_gethostbyaddr_probe(void)
         }
 
         probe_say(
-            "GHBA %-12s ip=%s len=%u type=%d result=%08x h_before=%d h_after=%d ms=%llu",
+            "GHBA %-12s ip=%s len=%u type=%d result=%08x ms=%llu",
             c->label,
             c->ip,
             (unsigned)c->len,
             c->type,
             (unsigned)r->snap.hostent_ptr,
-            r->herr_before,
-            r->herr_after,
             (unsigned long long)r->elapsed_ms);
+
+        probe_say(
+            "GHBA %-12s HERR initial=%d seeded=%d before=%d after=%d",
+            c->label,
+            r->herr_initial,
+            r->herr_after_seed_failure,
+            r->herr_before,
+            r->herr_after);
 
         if (!r->snap.hostent_ptr) {
             probe_say(
