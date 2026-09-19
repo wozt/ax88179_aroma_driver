@@ -5,6 +5,7 @@
 #include <coreinit/time.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <wut_rplwrap.h>
@@ -3066,6 +3067,13 @@ static int socketlib_finish_worker(
      * Absolutely no logging/UI/network activity while nsysnet may be
      * closed.
      */
+    /*
+     * socketlasterr is FunctionPatched by the AX module.
+     * errno < 0 explicitly forces that hook to delegate to the real
+     * Nintendo socketlasterr().
+     */
+    errno = -1;
+
     r->lasterr_before =
         lasterr_fn();
 
@@ -3081,6 +3089,8 @@ static int socketlib_finish_worker(
     r->finish1_ms =
         OSTicksToMilliseconds(
             end - begin);
+
+    errno = -1;
 
     r->lasterr_after_finish1 =
         lasterr_fn();
@@ -3101,6 +3111,8 @@ static int socketlib_finish_worker(
         OSTicksToMilliseconds(
             end - begin);
 
+    errno = -1;
+
     r->lasterr_after_finish2 =
         lasterr_fn();
 
@@ -3119,6 +3131,8 @@ static int socketlib_finish_worker(
     r->restore_ms =
         OSTicksToMilliseconds(
             end - begin);
+
+    errno = -1;
 
     r->lasterr_after_restore =
         lasterr_fn();
