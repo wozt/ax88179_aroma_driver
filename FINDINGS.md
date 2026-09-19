@@ -1249,3 +1249,62 @@ Conclusion :
     [✓] Smash 4 : matchmaking réel
     [✓] Smash 4 : connexion P2P / gameplay réel
     [✓] Smash 4 : partie en ligne complète
+
+
+## DNS async : premier audit ABI natif
+
+Un probe passif a résolu et lu le code des exports nsysnet sans appeler
+les fonctions DNS non documentées.
+
+Exports observés :
+
+    getaddrinfo          = 0x010c4f38
+    getaddrinfo_async    = 0x010c4f60
+    getaddrinfo_rs       = 0x010c4f88
+    getaddrinfo_async_rs = 0x010c4fb0
+    gethostbyaddr        = 0x010c4704
+    dns_abort_by_hname   = 0x010c4fd8
+    clear_resolver_cache = 0x010c3f8c
+    set_resolver_allocator = 0x010c3fb8
+
+Les quatre variantes getaddrinfo appellent le même helper interne :
+
+    0x010c4900
+
+Le wrapper sélectionne le mode via r7 :
+
+    getaddrinfo          : r7 = 0
+    getaddrinfo_async    : r7 = 1
+    getaddrinfo_rs       : r7 = 0
+    getaddrinfo_async_rs : r7 = 1
+
+Le wrapper passe également en r8 une zone de travail locale située à
+stack+8.
+
+Tailles de stack observées :
+
+    getaddrinfo          : 0x36c0
+    getaddrinfo_async    : 0x36c0
+    getaddrinfo_rs       : 0x588
+    getaddrinfo_async_rs : 0x2d0
+
+Les registres r3-r6 sont transmis au helper sans modification.
+
+r9/r10 traversent également le wrapper sans être explicitement écrasés ;
+il faut donc inspecter le helper avant de conclure définitivement sur le
+nombre d'arguments publics des variantes async.
+
+gethostbyaddr montre explicitement :
+
+    r5 comparé à AF_INET (2)
+    r4 comparé à 4
+    adresse IPv4 lue depuis r3
+
+ce qui concorde avec :
+
+    gethostbyaddr(addr, len, type)
+
+set_resolver_allocator vérifie r3 et r4 et stocke deux pointeurs,
+ce qui confirme son ABI à deux arguments.
+
+Aucun appel expérimental n'a été effectué pendant ce test.
