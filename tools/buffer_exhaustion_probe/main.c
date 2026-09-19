@@ -9,8 +9,11 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <wut_rplwrap.h>
 
 #include "probe.h"
+
+extern int RPLWRAP(socketlasterr)(void);
 
 #define PEER_IP       "192.168.2.100"
 #define PEER_CTRL     19049
@@ -112,7 +115,7 @@ static unsigned drain_socket(
             fd,
             buf,
             sizeof(buf),
-            MSG_DONTWAIT);
+            0);
 
         if (n > 0) {
             packets++;
@@ -127,10 +130,16 @@ static unsigned drain_socket(
             errno == EWOULDBLOCK)
             break;
 
-        probe_say(
-            "drain fd=%d FAIL errno=%d",
-            fd,
-            errno);
+        {
+            int e = errno;
+            int nerr = RPLWRAP(socketlasterr)();
+
+            probe_say(
+                "drain fd=%d FAIL errno=%d nerr=%d",
+                fd,
+                e,
+                nerr);
+        }
         break;
     }
 
