@@ -1774,3 +1774,58 @@ Résultat :
     [✓] code retour natif reproduit
     [✓] comportement pending reproduit
     [✓] comportement sans requête reproduit
+
+
+## gethostbyaddr natif : reverse DNS IPv4 confirmé
+
+Le gethostbyaddr natif de nsysnet effectue un vrai reverse DNS IPv4.
+
+Mesures :
+
+    8.8.8.8
+        -> dns.google
+        h_addrtype = AF_INET (2)
+        h_length   = 4
+        h_errno    = 0
+
+    1.1.1.1
+        -> one.one.one.one
+        h_addrtype = AF_INET (2)
+        h_length   = 4
+        h_errno    = 0
+
+    192.0.2.1 sans PTR
+        -> NULL
+        h_errno = 0
+
+    8.8.8.8 avec len=3
+        -> NULL
+        h_errno = 0
+
+    8.8.8.8 avec family=0
+        -> NULL
+        h_errno = 0
+
+Les appels successifs réutilisent le même stockage :
+
+    hostent      = même adresse
+    h_name       = même buffer
+    h_aliases    = même buffer
+    h_addr_list  = même buffer
+
+Le contenu est donc statique/réutilisable comme pour les anciennes API
+hostent classiques.
+
+Il reste à mesurer précisément :
+
+    - h_aliases[0]
+    - h_addr_list[0]
+    - h_addr_list[1]
+    - les 4 octets de l'adresse retournée
+
+Note infrastructure probe :
+
+    probe_say() ne doit pas être utilisé depuis un worker secondaire.
+    Il appelle draw()/SDL et modifie l'état UI global. Les résultats
+    d'un worker doivent être stockés puis affichés après OSJoinThread()
+    depuis le thread principal.
