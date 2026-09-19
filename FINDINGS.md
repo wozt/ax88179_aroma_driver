@@ -1514,3 +1514,40 @@ Conclusion :
 Le resolver AX utilise le DNS asynchrone raw de lwIP plutôt qu'un thread
 bloquant artificiel. Les réponses terminées sont récupérées depuis le
 cache DNS lwIP au polling suivant.
+
+
+## clear_resolver_cache : une entrée résolue reste disponible
+
+Le comportement natif de clear_resolver_cache() a été mesuré.
+
+Séquence :
+
+    getaddrinfo("www.openbsd.org")
+        rc=0
+        159 ms
+
+    getaddrinfo_async("www.openbsd.org")
+        rc=0
+        0 ms
+
+    clear_resolver_cache()
+
+    getaddrinfo_async("www.openbsd.org")
+        rc=0
+        0 ms
+        attempts=1
+
+Conclusion observée :
+
+clear_resolver_cache() ne supprime pas une résolution terminée de la
+couche de cache visible par getaddrinfo_async() dans ce scénario.
+
+Il serait donc incorrect d'implémenter immédiatement cet export côté AX
+comme un vidage complet de la table DNS lwIP : cela aurait un comportement
+plus agressif que le nsysnet natif mesuré.
+
+Le code PowerPC natif de clear_resolver_cache() est un wrapper très mince
+qui émet l'ioctl /dev/socket 0x32 vers IOSU.
+
+Le comportement sur une résolution encore EAI_INPROGRESS reste à mesurer
+avant de décider de l'implémentation AX.
