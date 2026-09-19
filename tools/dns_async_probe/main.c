@@ -7,6 +7,7 @@
 #include "probe.h"
 
 #define DUMP_WORDS 24
+#define HELPER_DUMP_WORDS 128
 
 static OSDynLoad_Module g_nsysnet;
 
@@ -44,6 +45,77 @@ static uintptr_t branch_target(uintptr_t pc, uint32_t insn)
         return (uintptr_t)(uint32_t)disp;
 
     return pc + disp;
+}
+
+static uintptr_t find_first_direct_call(void *fn)
+{
+    if (!fn)
+        return 0;
+
+    volatile const uint32_t *p =
+        (volatile const uint32_t *)fn;
+
+    uintptr_t base = (uintptr_t)fn;
+
+    /*
+     * Scan enough of the tiny export wrapper to reach its common
+     * getaddrinfo helper call.
+     *
+     * PPC opcode 18 + LK=1 = direct BL.
+     */
+    for (unsigned i = 0; i < 16; i++) {
+        uint32_t insn = p[i];
+
+        if ((insn & 0xfc000001u) !=
+            0x48000001u)
+            continue;
+
+        uintptr_t target =
+            branch_target(
+                base + i * 4,
+                insn);
+
+        if (target)
+            return target;
+    }
+
+    return 0;
+}
+
+static void dump_words(
+    const char *name,
+    uintptr_t address,
+    unsigned words)
+{
+    if (!address)
+        return;
+
+    volatile const uint32_t *p =
+        (volatile const uint32_t *)address;
+
+    probe_say(
+        "=== INTERNAL %s @ %08x words=%u ===",
+        name,
+        (unsigned)address,
+        words);
+
+    for (unsigned i = 0; i < words; i += 4) {
+        probe_say(
+            "%08x: %08x %08x %08x %08x",
+            (unsigned)(address + i * 4),
+            p[i + 0],
+            p[i + 1],
+            p[i + 2],
+            p[i + 3]);
+
+        if ((i & 0x0f) == 0x0c) {
+            if (!probe_poll())
+                return;
+
+            OSSleepTicks(
+                OSMillisecondsToTicks(5));
+        }
+    }
 }
 
 static void dump_code(const char *name, void *fn)
@@ -186,7 +258,32 @@ int main(void)
     }
 
     probe_say("%s", "");
-    probe_say("DNS ASYNC CODE DUMP COMPLETE");
+
+    /*
+     * All four public getaddrinfo wrappers observed so far call the
+     * same internal routine. Find it dynamically from the native
+     * getaddrinfo_async wrapper instead of hardcoding its address.
+     */
+    uintptr_t helper =
+        find_first_direct_call(
+            exports[1].addr);
+
+    probe_say(
+        "getaddrinfo_async first BL target=%08x",
+        (unsigned)helper);
+
+    if (helper) {
+        dump_words(
+            "GETADDRINFO COMMON HELPER",
+            helper,
+            HELPER_DUMP_WORDS);
+    } else {
+        probe_say(
+            "COMMON HELPER NOT FOUND");
+    }
+
+    probe_say("%s", "");
+    probe_say("DNS ASYNC HELPER DUMP COMPLETE");
 
 wait:
     probe_say("HOME -> Quitter");
