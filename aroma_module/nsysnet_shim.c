@@ -667,11 +667,19 @@ DECL_FUNCTION(int, accept, int sockfd, struct nsn_sockaddr *addr, socklen_t *add
     int s = lwip_accept(stack_fd(sockfd), addr ? (struct sockaddr *)&l : NULL, addr ? &llen : NULL);
     if (s >= 0) {
         int native_sndbuf = 8192;
+        int native_rcvbuf = 8192;
+
         lwip_setsockopt(s,
                         SOL_SOCKET,
                         SO_SNDBUF,
                         &native_sndbuf,
                         sizeof(native_sndbuf));
+
+        lwip_setsockopt(s,
+                        SOL_SOCKET,
+                        SO_RCVBUF,
+                        &native_rcvbuf,
+                        sizeof(native_rcvbuf));
 
         /*
          * accept() can only produce a connection-oriented socket here.

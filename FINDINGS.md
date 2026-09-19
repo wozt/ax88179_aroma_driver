@@ -2238,3 +2238,21 @@ The title-visible RCVBUF ABI already matches, but real TCP receive flow
 control does not.
 
 A per-PCB receive-window limit controlled by SO_RCVBUF is required.
+
+
+## TCP RCVBUF patch initial build correction
+
+The first build of the per-PCB TCP receive-window patch failed in
+vendor/lwip/src/api/sockets.c with:
+
+    implicit declaration of TCPWND_MIN16
+    implicit declaration of tcp_update_rcv_ann_wnd
+
+Both symbols are internal lwIP TCP helpers declared by:
+
+    lwip/priv/tcp_priv.h
+
+sockets.c already included lwip/tcp.h but not tcp_priv.h.
+
+The implementation itself was not changed. The missing internal header
+was added and the module was rebuilt.

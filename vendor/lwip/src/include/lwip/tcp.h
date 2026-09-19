@@ -137,13 +137,20 @@ typedef err_t (*tcp_connected_fn)(void *arg, struct tcp_pcb *tpcb, err_t err);
 #define RCV_WND_SCALE(pcb, wnd) (((wnd) >> (pcb)->rcv_scale))
 #define SND_WND_SCALE(pcb, wnd) (((wnd) << (pcb)->snd_scale))
 #define TCPWND16(x)             ((u16_t)LWIP_MIN((x), 0xFFFF))
-#define TCP_WND_MAX(pcb)        ((tcpwnd_size_t)(((pcb)->flags & TF_WND_SCALE) ? TCP_WND : TCPWND16(TCP_WND)))
+#define TCP_WND_CONFIG_MAX(pcb) ((tcpwnd_size_t)(((pcb)->flags & TF_WND_SCALE) ? TCP_WND : TCPWND16(TCP_WND)))
 #else
 #define RCV_WND_SCALE(pcb, wnd) (wnd)
 #define SND_WND_SCALE(pcb, wnd) (wnd)
 #define TCPWND16(x)             (x)
-#define TCP_WND_MAX(pcb)        TCP_WND
+#define TCP_WND_CONFIG_MAX(pcb) ((tcpwnd_size_t)(TCP_WND))
 #endif
+
+/*
+ * The stock lwIP window is global. The Wii U nsysnet ABI exposes
+ * SO_RCVBUF as a real per-socket TCP receive limit, so allow each
+ * PCB to further restrict that configured maximum.
+ */
+#define TCP_WND_MAX(pcb)   ((tcpwnd_size_t)LWIP_MIN((pcb)->rcv_wnd_max, TCP_WND_CONFIG_MAX(pcb)))
 /* Increments a tcpwnd_size_t and holds at max value rather than rollover */
 #define TCP_WND_INC(wnd, inc)   do { \
                                   if ((tcpwnd_size_t)(wnd + inc) >= wnd) { \
@@ -282,6 +289,7 @@ struct tcp_pcb {
   /* receiver variables */
   u32_t rcv_nxt;   /* next seqno expected */
   tcpwnd_size_t rcv_wnd;   /* receiver window available */
+  tcpwnd_size_t rcv_wnd_max; /* per-PCB maximum receive window */
   tcpwnd_size_t rcv_ann_wnd; /* receiver window to announce */
   u32_t rcv_ann_right_edge; /* announced right edge of window */
 

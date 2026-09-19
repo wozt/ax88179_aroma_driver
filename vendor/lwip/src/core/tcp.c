@@ -1175,7 +1175,10 @@ tcp_connect(struct tcp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port,
   pcb->snd_lbb = iss - 1;
   /* Start with a window that does not need scaling. When window scaling is
      enabled and used, the window is enlarged when both sides agree on scaling. */
-  pcb->rcv_wnd = pcb->rcv_ann_wnd = TCPWND_MIN16(TCP_WND);
+  pcb->rcv_wnd =
+    pcb->rcv_ann_wnd =
+      TCPWND_MIN16(TCP_WND_MAX(pcb));
+
   pcb->rcv_ann_right_edge = pcb->rcv_nxt;
   pcb->snd_wnd = TCP_WND;
   /* As initial send MSS, we use TCP_MSS but limit it to 536.
@@ -1917,9 +1920,14 @@ tcp_alloc(u8_t prio)
     pcb->prio = prio;
     pcb->snd_buf = TCP_SND_BUF;
     pcb->snd_buf_max = TCP_SND_BUF;
+
+    pcb->rcv_wnd_max = TCP_WND;
+
     /* Start with a window that does not need scaling. When window scaling is
        enabled and used, the window is enlarged when both sides agree on scaling. */
-    pcb->rcv_wnd = pcb->rcv_ann_wnd = TCPWND_MIN16(TCP_WND);
+    pcb->rcv_wnd =
+      pcb->rcv_ann_wnd =
+        TCPWND_MIN16(TCP_WND_MAX(pcb));
     pcb->ttl = TCP_TTL;
     /* As initial send MSS, we use TCP_MSS but limit it to 536.
        The send MSS is updated when an MSS option is received. */

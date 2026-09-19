@@ -261,8 +261,9 @@ struct netconn {
   u32_t recv_timeout;
 #endif /* LWIP_SO_RCVTIMEO */
 #if LWIP_SO_RCVBUF
-  /** maximum amount of bytes queued in recvmbox
-      not used for TCP: adjust TCP_WND instead! */
+  /** maximum amount of bytes queued for the application.
+      UDP/RAW enforce this directly in recvmbox; the sockets layer also
+      mirrors non-negative TCP SO_RCVBUF values into pcb->rcv_wnd_max. */
   int recv_bufsize;
   /** number of bytes currently in recvmbox to be received,
       tested against recv_bufsize to limit bytes on recvmbox

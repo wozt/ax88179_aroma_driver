@@ -47,6 +47,7 @@
 #include "lwip/igmp.h"
 #include "lwip/inet.h"
 #include "lwip/tcp.h"
+#include "lwip/priv/tcp_priv.h"
 #include "lwip/raw.h"
 #include "lwip/udp.h"
 #include "lwip/memp.h"
@@ -3607,10 +3608,96 @@ lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_
 #endif /* LWIP_TCP */
 
 #if LWIP_SO_RCVBUF
-        case SO_RCVBUF:
+        case SO_RCVBUF: {
+          int requested;
+
           LWIP_SOCKOPT_CHECK_OPTLEN_CONN(sock, optlen, int);
-          netconn_set_recvbufsize(sock->conn, *(const int *)optval);
+
+          requested = *(const int *)optval;
+
+          /*
+           * Keep the normal netconn value for ABI/FIONREAD accounting.
+           * UDP/RAW continue to use it exactly as before.
+           */
+          netconn_set_recvbufsize(sock->conn, requested);
+
+#if LWIP_TCP
+          /*
+           * nsysnet SO_RCVBUF is also a real TCP flow-control limit.
+           *
+           * Negative values are valid title-visible ABI values but their
+           * network semantics have not been characterized, so do not alter
+           * the TCP window for negative requests.
+           */
+          if ((requested >= 0) &&
+              (NETCONNTYPE_GROUP(netconn_type(sock->conn)) == NETCONN_TCP) &&
+              (sock->conn->pcb.tcp != NULL) &&
+              (sock->conn->pcb.tcp->state != LISTEN)) {
+
+            struct tcp_pcb *pcb = sock->conn->pcb.tcp;
+
+            tcpwnd_size_t limit =
+              (tcpwnd_size_t)LWIP_MIN(
+                (u32_t)requested,
+                (u32_t)TCP_WND);
+
+            pcb->rcv_wnd_max = limit;
+
+            /*
+             * The normal nsysnet use is setsockopt before connect.
+             * In CLOSED state no receive data exists yet, so the window can
+             * be changed exactly before the SYN advertises it.
+             */
+            if (pcb->state == CLOSED) {
+              pcb->rcv_wnd =
+                pcb->rcv_ann_wnd =
+                  TCPWND_MIN16(TCP_WND_MAX(pcb));
+
+              pcb->rcv_ann_right_edge = pcb->rcv_nxt;
+            } else {
+              /*
+               * Also behave sensibly if a title changes RCVBUF after the
+               * connection is live. Account for data already waiting in the
+               * recv mailbox. TCP cannot retract an already advertised right
+               * edge, but future receive-window growth obeys the new limit.
+               */
+              int recv_avail;
+              tcpwnd_size_t target;
+
+              SYS_ARCH_GET(sock->conn->recv_avail, recv_avail);
+
+              if (recv_avail < 0) {
+                recv_avail = 0;
+              }
+
+              if ((u32_t)recv_avail >= (u32_t)limit) {
+                target = 0;
+              } else {
+                target =
+                  (tcpwnd_size_t)(
+                    limit - (tcpwnd_size_t)recv_avail);
+              }
+
+              if (target > pcb->rcv_wnd) {
+                u32_t grow =
+                  (u32_t)target - (u32_t)pcb->rcv_wnd;
+
+                while (grow != 0) {
+                  u16_t step =
+                    (u16_t)LWIP_MIN(grow, 0xffffU);
+
+                  tcp_recved(pcb, step);
+                  grow -= step;
+                }
+              } else if (target < pcb->rcv_wnd) {
+                pcb->rcv_wnd = target;
+                tcp_update_rcv_ann_wnd(pcb);
+              }
+            }
+          }
+#endif /* LWIP_TCP */
           break;
+        }
 #endif /* LWIP_SO_RCVBUF */
 #if LWIP_SO_LINGER
         case SO_LINGER: {
