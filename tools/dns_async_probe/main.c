@@ -1814,6 +1814,208 @@ static void run_dns_abort_probe(void)
         "=== END NATIVE DNS ABORT BY HNAME TEST ===");
 }
 
+
+static void run_dns_abort_rc_matrix(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== NATIVE DNS ABORT RETURN MATRIX ===");
+
+    raw_getaddrinfo_fn sync_fn =
+        (raw_getaddrinfo_fn)find_export_addr(
+            "getaddrinfo");
+
+    raw_getaddrinfo_fn async_fn =
+        (raw_getaddrinfo_fn)find_export_addr(
+            "getaddrinfo_async");
+
+    raw_freeaddrinfo_fn native_free =
+        (raw_freeaddrinfo_fn)find_export_addr(
+            "freeaddrinfo");
+
+    raw_dns_abort_fn abort_fn =
+        (raw_dns_abort_fn)find_export_addr(
+            "dns_abort_by_hname");
+
+    if (!sync_fn ||
+        !async_fn ||
+        !native_free ||
+        !abort_fn) {
+
+        probe_say(
+            "DNS-ABORT-MATRIX missing export");
+        return;
+    }
+
+    /*
+     * Case 1: hostname for which this probe never started a query.
+     */
+    const char *never_started =
+        "ax88179-abort-never-started.invalid";
+
+    int rc =
+        abort_fn(never_started);
+
+    probe_say(
+        "DNS-ABORT-MATRIX no-request host=%s rc=%d",
+        never_started,
+        rc);
+
+    /*
+     * Case 2: hostname definitely resolved before abort().
+     */
+    const char *cached_host =
+        "www.ietf.org";
+
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    struct nsn_addrinfo *res = NULL;
+
+    int populate_rc =
+        sync_fn(
+            cached_host,
+            "80",
+            &hints,
+            &res);
+
+    probe_say(
+        "DNS-ABORT-MATRIX cached populate rc=%d res=%08x",
+        populate_rc,
+        (unsigned)(uintptr_t)res);
+
+    if (populate_rc == 0 && res) {
+        native_free(res);
+        res = NULL;
+    }
+
+    rc =
+        abort_fn(cached_host);
+
+    probe_say(
+        "DNS-ABORT-MATRIX cached host=%s abort_rc=%d",
+        cached_host,
+        rc);
+
+    /*
+     * Case 3: same hostname while getaddrinfo_async returned
+     * EAI_INPROGRESS.
+     */
+    static const char *same_candidates[] = {
+        "www.cmake.org",
+        "www.perl.org",
+        "www.sqlite.org",
+        "www.netlib.org"
+    };
+
+    const char *same_host = NULL;
+
+    int same_start =
+        start_fresh_native_async(
+            async_fn,
+            native_free,
+            same_candidates,
+            sizeof(same_candidates) /
+                sizeof(same_candidates[0]),
+            &same_host);
+
+    if (same_start == NSN_EAI_INPROGRESS &&
+        same_host) {
+
+        int same_abort =
+            abort_fn(same_host);
+
+        probe_say(
+            "DNS-ABORT-MATRIX pending-same host=%s start=%d abort_rc=%d",
+            same_host,
+            same_start,
+            same_abort);
+
+        int attempts = 0;
+
+        int final =
+            poll_native_async_to_end(
+                async_fn,
+                native_free,
+                same_host,
+                same_start,
+                &attempts);
+
+        probe_say(
+            "DNS-ABORT-MATRIX pending-same final=%d attempts=%d",
+            final,
+            attempts);
+    } else {
+        probe_say(
+            "DNS-ABORT-MATRIX pending-same INCONCLUSIVE");
+    }
+
+    /*
+     * Case 4:
+     * Keep one request pending but ask abort() for another hostname
+     * which has no corresponding request.
+     */
+    static const char *other_candidates[] = {
+        "www.lua.org",
+        "www.haskell.org",
+        "www.ruby-lang.org",
+        "www.php.net"
+    };
+
+    const char *other_host = NULL;
+
+    int other_start =
+        start_fresh_native_async(
+            async_fn,
+            native_free,
+            other_candidates,
+            sizeof(other_candidates) /
+                sizeof(other_candidates[0]),
+            &other_host);
+
+    if (other_start == NSN_EAI_INPROGRESS &&
+        other_host) {
+
+        const char *wrong_host =
+            "ax88179-abort-wrong-host.invalid";
+
+        int other_abort =
+            abort_fn(wrong_host);
+
+        probe_say(
+            "DNS-ABORT-MATRIX pending-other active=%s abort=%s start=%d abort_rc=%d",
+            other_host,
+            wrong_host,
+            other_start,
+            other_abort);
+
+        int attempts = 0;
+
+        int final =
+            poll_native_async_to_end(
+                async_fn,
+                native_free,
+                other_host,
+                other_start,
+                &attempts);
+
+        probe_say(
+            "DNS-ABORT-MATRIX pending-other final=%d attempts=%d",
+            final,
+            attempts);
+    } else {
+        probe_say(
+            "DNS-ABORT-MATRIX pending-other INCONCLUSIVE");
+    }
+
+    probe_say(
+        "=== END NATIVE DNS ABORT RETURN MATRIX ===");
+}
+
 static void run_shim_dns_probe(void)
 {
     probe_say("%s", "");
@@ -2000,6 +2202,14 @@ int main(void)
 
     probe_say("%s", "");
 
+    dump_words(
+        "DNS_ABORT_BY_HNAME FULL",
+        (uintptr_t)find_export_addr(
+            "dns_abort_by_hname"),
+        64);
+
+    probe_say("%s", "");
+
     /*
      * All four public getaddrinfo wrappers observed so far call the
      * same internal routine. Find it dynamically from the native
@@ -2037,6 +2247,8 @@ int main(void)
     run_clear_negative_probe();
 
     run_dns_abort_probe();
+
+    run_dns_abort_rc_matrix();
 
     run_shim_dns_probe();
 
