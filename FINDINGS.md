@@ -2498,3 +2498,84 @@ The existing successful native recvfrom_ex characterization used
 
 Buffer/address alignment is therefore the next variable isolated by the
 probe.
+
+
+## Native UDP buffer pressure reference validated
+
+After changing the UDP drain buffers and source sockaddr to 0x40-aligned
+storage, the native exhaustion/pressure probe worked correctly.
+
+Confirmed native path:
+
+    SO_MYADDR=192.168.2.124
+
+Eight bound UDP sockets were configured with:
+
+    SO_RCVBUF=65535
+
+The peer sent:
+
+    64 datagrams/socket
+    1400 payload bytes/datagram
+    8 sockets
+    512 datagrams total
+    716800 payload bytes total
+
+Native retained exactly the same amount on every socket:
+
+    SO_RXDATA=65136
+    packets=46
+    payload bytes=64400
+
+This was identical for all eight sockets and for all three rounds.
+
+The SO_RXDATA value has an exact relationship to the received datagrams:
+
+    46 * 1400 = 64400 payload bytes
+    46 * 1416 = 65136 SO_RXDATA bytes
+
+Therefore native UDP SO_RXDATA appears to account for approximately
+16 bytes of queue overhead per datagram in addition to payload.
+
+This also exactly explains the per-socket cutoff:
+
+    46 * 1416 = 65136 <= 65535
+    47 * 1416 = 66552 > 65535
+
+So the tested limit is the configured per-socket RCVBUF rather than a
+measured native global allocation ceiling.
+
+Across all eight sockets, native successfully held at least:
+
+    368 queued datagrams
+    515200 payload bytes
+
+simultaneously.
+
+After draining every round, the peer sent three small recovery
+datagrams to every socket.
+
+All three rounds reported:
+
+    RECOVERY sockets=8/8
+    packets=24
+
+This confirms stable resource release and reuse with no observable leak
+across the repeated test.
+
+### Alignment observation
+
+With stack-local unaligned receive/sockaddr buffers, both recv() and
+recvfrom() returned:
+
+    socketlasterr=12
+    WUT errno=EMSGSIZE
+
+Once both the receive data buffer and sockaddr buffer were explicitly
+0x40-aligned, ordinary native recvfrom() worked.
+
+This alignment-sensitive behaviour is retained as an observed native ABI
+property for this receive path.
+
+Global native buffer exhaustion has not yet been reached: the
+per-socket RCVBUF limit was reached first.
