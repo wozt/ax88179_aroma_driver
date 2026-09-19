@@ -1813,3 +1813,45 @@ probe's wait path rather than retrieved as a native socket error.
 This case is retained as an observed native result but should be
 compared against AX and, if necessary, repeated before assigning exact
 socket-level semantics to SNDBUF=0.
+
+
+## Native backpressure repeat validation
+
+The native SNDBUF/backpressure characterization was repeated.
+
+Confirmed path:
+
+    SO_MYADDR=192.168.2.124
+
+The second run reproduced the important results of the first run.
+
+Negative values down to INT_MIN were again accepted and returned
+unchanged for both SO_SNDBUF and SO_RCVBUF.
+
+TCP nonblocking backpressure was again strongly dependent on SO_SNDBUF:
+
+    default / 8192 -> 13040 bytes before EWOULDBLOCK
+    1              -> 2720 bytes
+    4096           -> 8560 bytes
+    16384          -> 21800 bytes
+    65535          -> 69980 bytes
+
+Backpressure consistently produced:
+
+    errno=11
+    socketlasterr=6
+
+SO_TXDATA again reported real queued transmit data rather than a fixed
+zero value.
+
+The exact TXDATA value after the peer resumes reading varies with TCP
+timing and therefore should not be treated as an exact byte-for-byte ABI
+constant.
+
+SO_SNDBUF=0 again caused the subsequent nonblocking connection wait to
+time out. This makes the special case reproducible, although its precise
+internal native mechanism remains uncharacterized.
+
+The unrelated delayed console crash occurring minutes after returning
+to the menu is intentionally tracked separately and does not invalidate
+the completed native measurements above.
