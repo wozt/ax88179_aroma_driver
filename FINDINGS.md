@@ -1855,3 +1855,70 @@ internal native mechanism remains uncharacterized.
 The unrelated delayed console crash occurring minutes after returning
 to the menu is intentionally tracked separately and does not invalidate
 the completed native measurements above.
+
+
+## AX TCP backpressure mismatch before fix
+
+The native backpressure probe was repeated unchanged through the AX/lwIP
+path.
+
+Confirmed path:
+
+    SO_MYADDR=192.168.2.190
+
+The title-visible SNDBUF/RCVBUF ABI already matched the native results,
+including all tested negative values down to INT_MIN.
+
+However the real TCP send behaviour did not match native nsysnet.
+
+Regardless of SO_SNDBUF:
+
+    default
+    0
+    1
+    4096
+    8192
+    16384
+    65535
+
+the AX path accepted exactly:
+
+    27740 bytes
+    19 send calls
+
+before returning:
+
+    errno=11
+    socketlasterr=6
+    EWOULDBLOCK
+
+This proves that the current compatibility state:
+
+    compat_sock[].sndbuf
+
+only changes the title-visible getter and has no effect on the real lwIP
+TCP send queue.
+
+SO_TXDATA was also always reported as zero:
+
+    TXDATA=0
+
+both at backpressure and after recovery, unlike native nsysnet where it
+reflects real outstanding transmit data.
+
+The special native SO_SNDBUF=0 behaviour also does not match:
+
+Native:
+
+    setsockopt succeeds
+    nonblocking connect never becomes writable during the probe timeout
+
+AX before fix:
+
+    connect succeeds normally
+    socket accepts the same 27740 bytes as every other SNDBUF setting
+
+Conclusion:
+
+A real per-PCB send-buffer limit and real transmit-data accounting are
+required inside lwIP. Pure ABI state in nsysnet_shim.c is insufficient.
