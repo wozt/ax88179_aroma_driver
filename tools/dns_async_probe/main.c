@@ -2267,14 +2267,44 @@ static int gethostbyaddr_case_worker(
             (unsigned)snap.addrlist_ptr);
 
         probe_say(
-            "GHBA %-12s SNAP type=%d len=%d name_term=%d name=%s",
+            "GHBA %-12s SNAP type=%d len=%d name_term=%d",
             c->label,
             snap.addrtype,
             snap.length,
-            snap.name_terminated,
-            snap.name_ptr
-                ? snap.name
-                : "(null)");
+            snap.name_terminated);
+
+        /*
+         * Avoid %s entirely here.
+         *
+         * The snapshot itself completes successfully, but passing the
+         * copied resolver name through probe_say("%s") crashes on real
+         * hardware. Dump the first bytes as integers instead.
+         */
+        if (snap.name_ptr) {
+            probe_say(
+                "GHBA %-12s NAMEHEX %02x %02x %02x %02x %02x %02x %02x %02x",
+                c->label,
+                (unsigned)(uint8_t)snap.name[0],
+                (unsigned)(uint8_t)snap.name[1],
+                (unsigned)(uint8_t)snap.name[2],
+                (unsigned)(uint8_t)snap.name[3],
+                (unsigned)(uint8_t)snap.name[4],
+                (unsigned)(uint8_t)snap.name[5],
+                (unsigned)(uint8_t)snap.name[6],
+                (unsigned)(uint8_t)snap.name[7]);
+
+            probe_say(
+                "GHBA %-12s NAMEHEX %02x %02x %02x %02x %02x %02x %02x %02x",
+                c->label,
+                (unsigned)(uint8_t)snap.name[8],
+                (unsigned)(uint8_t)snap.name[9],
+                (unsigned)(uint8_t)snap.name[10],
+                (unsigned)(uint8_t)snap.name[11],
+                (unsigned)(uint8_t)snap.name[12],
+                (unsigned)(uint8_t)snap.name[13],
+                (unsigned)(uint8_t)snap.name[14],
+                (unsigned)(uint8_t)snap.name[15]);
+        }
     }
 
     probe_say(
