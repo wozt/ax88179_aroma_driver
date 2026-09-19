@@ -72,7 +72,7 @@
 #define MEMP_NUM_NETBUF 512
 #define MEMP_NUM_NETCONN 32
 #define LWIP_SOCKET_OFFSET 0
-#define MEMP_NUM_TCPIP_MSG_INPKT 16
+#define MEMP_NUM_TCPIP_MSG_INPKT 512
 #define LWIP_DNS 1
 #define LWIP_NETCONN 1
 #define LWIP_SOCKET 1
@@ -81,11 +81,19 @@
  * queued, not when it has run, which made the netif setup below silently
  * asynchronous. */
 #define LWIP_TCPIP_CORE_LOCKING 1
-/* RX is called by the worker, never an interrupt. Process it synchronously
- * under the core lock, so ICMP/ARP replies are queued before input returns.
- * Timers and socket API messages still run in the tcpip thread. */
-#define LWIP_TCPIP_CORE_LOCKING_INPUT 1
-#define TCPIP_MBOX_SIZE 16
+/*
+ * RX is produced by the AX/UHS worker, but protocol processing happens on
+ * lwIP's tcpip thread.
+ *
+ * Keeping tcpip_input asynchronous is important for burst throughput:
+ * the USB worker can immediately continue draining the AX88179 instead of
+ * waiting for ethernet/IP/UDP processing under the core lock.
+ *
+ * The input message pool and mailbox are deliberately large enough for
+ * the characterized burst tests.
+ */
+#define LWIP_TCPIP_CORE_LOCKING_INPUT 0
+#define TCPIP_MBOX_SIZE 512
 #define TCPIP_THREAD_STACKSIZE (32 * 1024)
 #define TCPIP_THREAD_PRIO 1
 #define DEFAULT_THREAD_STACKSIZE (16 * 1024)

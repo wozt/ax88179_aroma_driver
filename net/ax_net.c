@@ -21,9 +21,10 @@
 /*
  * Threaded lwIP port: the tcpip thread owns the lwIP core, the caller of
  * ax_net_poll (the module's worker thread) exclusively owns UHS and the
- * adapter. tcpip_input processes RX synchronously under the core lock;
- * outgoing frames go through a slot queue to the worker, which alone
- * calls into the AX88179 driver.
+ * adapter. RX pbufs are posted asynchronously to lwIP's tcpip thread so
+ * the UHS worker can return to USB reception quickly. Outgoing frames go
+ * through a slot queue to the worker, which alone calls into the AX88179
+ * driver.
  *
  * Anything that has to change lwIP state from the worker is done under
  * LOCK_TCPIP_CORE rather than through tcpip_callback. That is not a
@@ -332,9 +333,11 @@ int ax_net_poll(void)
     } else {
         stat_rx_idle++;
     }
-    /* CORE_LOCKING_INPUT makes input synchronous: generated replies are
-     * now queued. Drain after every receive, also when a timer/socket
-     * queued TX during an idle USB wait. No UHS call holds the core lock. */
+    /*
+     * RX input is asynchronous now: tcpip_input has queued the pbufs for
+     * the tcpip thread. Drain any TX that became ready meanwhile, then
+     * return to UHS as quickly as possible.
+     */
     drain_tx(iface.state, 1);
     /* The read paces the loop when it actually waits. Sleep only if it
      * came back far too fast to have waited, so a UHS that ignores the
