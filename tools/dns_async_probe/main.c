@@ -2059,63 +2059,27 @@ static void dump_native_hostent(
         return;
     }
 
+    /*
+     * Only read the fixed hostent fields.
+     *
+     * Do NOT dereference h_aliases or h_addr_list yet. Native
+     * gethostbyaddr returned a valid name/type/length on hardware, but
+     * walking h_addr_list crashed the probe.
+     */
     probe_say(
-        "GHBA %-12s hostent=%08x name=%s type=%d len=%d",
+        "GHBA %-12s hostent=%08x name_ptr=%08x aliases_ptr=%08x addrlist_ptr=%08x",
         label,
         (unsigned)(uintptr_t)h,
+        (unsigned)(uintptr_t)h->h_name,
+        (unsigned)(uintptr_t)h->h_aliases,
+        (unsigned)(uintptr_t)h->h_addr_list);
+
+    probe_say(
+        "GHBA %-12s name=%s type=%d len=%d",
+        label,
         h->h_name ? h->h_name : "(null)",
         h->h_addrtype,
         h->h_length);
-
-    int aliases = 0;
-
-    if (h->h_aliases) {
-        while (h->h_aliases[aliases] &&
-               aliases < 8) {
-
-            probe_say(
-                "  alias[%d]=%s",
-                aliases,
-                h->h_aliases[aliases]);
-
-            aliases++;
-        }
-    }
-
-    probe_say(
-        "  aliases=%d",
-        aliases);
-
-    int addresses = 0;
-
-    if (h->h_addr_list) {
-        while (h->h_addr_list[addresses] &&
-               addresses < 8) {
-
-            char ip[64] = "?";
-
-            if (h->h_addrtype == 2 &&
-                h->h_length == 4) {
-
-                inet_ntop(
-                    AF_INET,
-                    h->h_addr_list[addresses],
-                    ip,
-                    sizeof(ip));
-            }
-
-            probe_say(
-                "  addr[%d]=%s",
-                addresses,
-                ip);
-
-            addresses++;
-        }
-    }
-
-    probe_say(
-        "  addresses=%d",
-        addresses);
 }
 
 static int get_native_h_errno(
