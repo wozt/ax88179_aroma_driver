@@ -2096,12 +2096,34 @@ static int get_native_h_errno(
     return *p;
 }
 
-static int gethostbyaddr_worker(
+
+#define GHBA_CASE_COUNT \
+    (sizeof(ghba_cases) / sizeof(ghba_cases[0]))
+
+static OSThread ghba_threads[GHBA_CASE_COUNT]
+    __attribute__((aligned(0x40)));
+
+static uint8_t
+ghba_stacks[GHBA_CASE_COUNT][BEHAVIOR_STACK_SIZE]
+    __attribute__((aligned(0x40)));
+
+static atomic_int ghba_done;
+
+static int gethostbyaddr_case_worker(
     int argc,
     const char **argv)
 {
-    (void)argc;
     (void)argv;
+
+    unsigned index = (unsigned)argc;
+
+    if (index >= GHBA_CASE_COUNT) {
+        atomic_store(&ghba_done, 1);
+        return -1;
+    }
+
+    const struct ghba_case *c =
+        &ghba_cases[index];
 
     raw_gethostbyaddr_fn ghba =
         (raw_gethostbyaddr_fn)find_export_addr(
@@ -2113,80 +2135,82 @@ static int gethostbyaddr_worker(
 
     if (!ghba || !getherr) {
         probe_say(
-            "GHBA missing native export");
+            "GHBA %-12s missing native export",
+            c->label);
 
-        atomic_store(
-            &behavior_done,
-            1);
-
+        atomic_store(&ghba_done, 1);
         return -1;
     }
 
-    for (unsigned i = 0;
-         i < sizeof(ghba_cases) /
-             sizeof(ghba_cases[0]);
-         i++) {
+    struct in_addr addr;
 
-        const struct ghba_case *c =
-            &ghba_cases[i];
-
-        struct in_addr addr;
-
-        if (inet_pton(
-                AF_INET,
-                c->ip,
-                &addr) != 1) {
-
-            probe_say(
-                "GHBA %s inet_pton FAIL",
-                c->label);
-
-            continue;
-        }
-
-        /*
-         * Put a recognizable value in h_errno before the call so we
-         * can determine whether success/failure updates it.
-         */
-        int *herrp = getherr();
-
-        if (herrp)
-            *herrp = 0x12345678;
-
-        OSTime begin =
-            OSGetTime();
-
-        struct hostent *h =
-            ghba(
-                &addr,
-                c->len,
-                c->type);
-
-        uint64_t elapsed =
-            OSTicksToMilliseconds(
-                OSGetTime() - begin);
-
-        int herr =
-            get_native_h_errno(
-                getherr);
+    if (inet_pton(
+            AF_INET,
+            c->ip,
+            &addr) != 1) {
 
         probe_say(
-            "GHBA %-12s ip=%s len=%u type=%d result=%08x h_errno=%d ms=%llu",
-            c->label,
-            c->ip,
-            (unsigned)c->len,
-            c->type,
-            (unsigned)(uintptr_t)h,
-            herr,
-            (unsigned long long)elapsed);
+            "GHBA %-12s inet_pton FAIL",
+            c->label);
 
-        dump_native_hostent(
-            c->label,
-            h);
+        atomic_store(&ghba_done, 1);
+        return -2;
     }
 
+    /*
+     * IMPORTANT:
+     *
+     * Do not write into native nsysnet h_errno.
+     * The WUT wrapper only reads this value after the call.
+     *
+     * Record before/after instead, without perturbing resolver state.
+     */
+    int herr_before =
+        get_native_h_errno(
+            getherr);
+
+    probe_say(
+        "GHBA %-12s BEGIN ip=%s len=%u type=%d h_errno_before=%d",
+        c->label,
+        c->ip,
+        (unsigned)c->len,
+        c->type,
+        herr_before);
+
+    OSTime begin =
+        OSGetTime();
+
+    struct hostent *h =
+        ghba(
+            &addr,
+            c->len,
+            c->type);
+
+    uint64_t elapsed =
+        OSTicksToMilliseconds(
+            OSGetTime() - begin);
+
+    int herr_after =
+        get_native_h_errno(
+            getherr);
+
+    probe_say(
+        "GHBA %-12s END result=%08x h_errno_after=%d ms=%llu",
+        c->label,
+        (unsigned)(uintptr_t)h,
+        herr_after,
+        (unsigned long long)elapsed);
+
+    dump_native_hostent(
+        c->label,
+        h);
+
+    probe_say(
+        "GHBA %-12s WORKER DONE",
+        c->label);
+
     atomic_store(
-        &behavior_done,
+        &ghba_done,
         1);
 
     return 0;
@@ -2198,53 +2222,85 @@ static void run_gethostbyaddr_probe(void)
     probe_say(
         "=== NATIVE GETHOSTBYADDR TEST ===");
 
-    atomic_store(
-        &behavior_done,
-        0);
+    for (unsigned i = 0;
+         i < GHBA_CASE_COUNT;
+         i++) {
 
-    BOOL created =
-        OSCreateThread(
-            &behavior_thread,
-            gethostbyaddr_worker,
-            0,
-            NULL,
-            behavior_stack +
-                sizeof(behavior_stack),
-            sizeof(behavior_stack),
-            16,
-            OS_THREAD_ATTRIB_AFFINITY_ANY);
+        const struct ghba_case *c =
+            &ghba_cases[i];
 
-    if (!created) {
         probe_say(
-            "GHBA worker OSCreateThread FAIL");
-        return;
+            "GHBA CASE %u/%u label=%s",
+            i + 1,
+            (unsigned)GHBA_CASE_COUNT,
+            c->label);
+
+        atomic_store(
+            &ghba_done,
+            0);
+
+        BOOL created =
+            OSCreateThread(
+                &ghba_threads[i],
+                gethostbyaddr_case_worker,
+                (int)i,
+                NULL,
+                ghba_stacks[i] +
+                    sizeof(ghba_stacks[i]),
+                sizeof(ghba_stacks[i]),
+                16,
+                OS_THREAD_ATTRIB_AFFINITY_ANY);
+
+        if (!created) {
+            probe_say(
+                "GHBA %-12s OSCreateThread FAIL",
+                c->label);
+
+            continue;
+        }
+
+        OSSetThreadName(
+            &ghba_threads[i],
+            "AX gethostbyaddr case");
+
+        OSResumeThread(
+            &ghba_threads[i]);
+
+        while (!atomic_load(
+                   &ghba_done)) {
+
+            if (!probe_poll()) {
+                probe_say(
+                    "GHBA ProcUI requested exit");
+                return;
+            }
+
+            OSSleepTicks(
+                OSMillisecondsToTicks(10));
+        }
+
+        int thread_result = -1;
+
+        OSJoinThread(
+            &ghba_threads[i],
+            &thread_result);
+
+        probe_say(
+            "GHBA %-12s JOIN result=%d",
+            c->label,
+            thread_result);
+
+        /*
+         * Keep cases well separated in time.
+         */
+        for (int n = 0; n < 5; n++) {
+            if (!probe_poll())
+                return;
+
+            OSSleepTicks(
+                OSMillisecondsToTicks(10));
+        }
     }
-
-    OSSetThreadName(
-        &behavior_thread,
-        "AX gethostbyaddr probe");
-
-    OSResumeThread(
-        &behavior_thread);
-
-    while (!atomic_load(
-               &behavior_done)) {
-
-        probe_poll();
-
-        OSSleepTicks(
-            OSMillisecondsToTicks(10));
-    }
-
-    int thread_result = -1;
-
-    OSJoinThread(
-        &behavior_thread,
-        &thread_result);
-
-    probe_say(
-        "GHBA worker result=%d",
-        thread_result);
 
     probe_say(
         "=== END NATIVE GETHOSTBYADDR TEST ===");
