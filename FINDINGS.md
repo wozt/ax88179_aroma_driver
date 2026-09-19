@@ -981,3 +981,52 @@ AX observation:
     MSG_IP_RECVTTL + msglen=0 -> datagram received successfully
 
 This zero-length metadata case requires dedicated characterization.
+
+
+## recvfrom_ex zero-length metadata native ABI
+
+Dedicated native characterization of `recvfrom_ex` with `extra_len=0`
+resolved the remaining ambiguity.
+
+Path:
+
+    route=native
+    local=192.168.2.124:19030
+
+Observed baseline receive first succeeded normally.
+
+Then:
+
+    flags=0x00, extra_len=0
+        rc=-1
+        socketlasterr=11
+
+    flags=0x40, extra_len=0
+        rc=-1
+        socketlasterr=11
+
+The `MSG_IP_RECVTTL + extra_len=0` case was repeated three times and
+returned the same result every time.
+
+In the shim's established nsysnet errno mapping:
+
+    nsysnet error 11 = EINVAL
+
+Therefore the native contract is:
+
+    recvfrom_ex(..., extra_len=0)
+        -> -1
+        -> EINVAL / socketlasterr 11
+        -> queued datagram is not consumed
+
+This rule is independent of MSG_IP_RECVTTL.
+
+The following `extra_len=1` receive succeeded immediately and returned
+the expected TTL, confirming that the zero-length calls rejected the
+operation before consuming the pending UDP datagram.
+
+For `extra_len >= 1`, the previously characterized behaviour remains:
+
+- output buffer is zero-filled through `extra_len`
+- with MSG_IP_RECVTTL, `extra[0]` contains the real received IPv4 TTL
+- datagram receive proceeds normally
