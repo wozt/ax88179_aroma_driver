@@ -2790,3 +2790,49 @@ Native UDP SO_RXDATA accounting remains a separate compatibility issue:
 
     native: payload + 16 bytes/datagram
     AX:     payload only
+
+
+## Complete AX USB bulk drain does not fix high-rate RX loss
+
+Commit d952964 changed the AX receive path so all ethernet frames already
+present in one USB bulk aggregate are delivered before returning to the
+outer module worker loop.
+
+The same pacing matrix was repeated.
+
+Results:
+
+    ~145.7 Mbit/s:
+        62 packets
+        86800 payload bytes
+
+    ~42.1 Mbit/s:
+        368 packets
+        515200 payload bytes
+
+    ~17.5 Mbit/s:
+        368 packets
+        515200 payload bytes
+
+All rounds recovered correctly:
+
+    RECOVERY sockets=8/8
+    packets=24/24
+
+Before the complete-bulk-drain change, the fast round retained about
+88 packets. Therefore draining a complete aggregate does not solve the
+high-rate receive loss by itself and, with synchronous lwIP input
+processing, made this particular fast burst result worse.
+
+The lower-rate native-capacity result remains unchanged.
+
+The next suspected bottleneck is synchronous lwIP input processing:
+the USB worker currently waits for the entire ethernet/IP/UDP input path
+before it can request more data from UHS.
+
+Next experiment:
+
+- keep complete current-bulk draining;
+- make tcpip_input asynchronous;
+- enlarge the tcpip input-message pool and mailbox so they cannot create
+  another artificial 16-packet limit.
