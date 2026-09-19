@@ -41,23 +41,26 @@
 #define TCP_WND (16 * TCP_MSS)
 #define TCP_SND_BUF (16 * TCP_MSS)
 #define TCP_SND_QUEUELEN ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
-#define MEMP_NUM_TCP_PCB 8
-#define MEMP_NUM_UDP_PCB 8
+#define MEMP_NUM_TCP_PCB 32
+#define MEMP_NUM_UDP_PCB 32
 #define MEMP_NUM_TCP_SEG 64
-/* Our fds run 16..31. The top stays at 31 because a title's fd_set is a
- * single 32-bit word, and starting at 16 keeps them clear of the numbers
- * nsysnet hands out. The shim routes on ownership, not on the number, so
- * this is only a second line of defence -- but it means nsysnet would
- * have to hold seventeen sockets at once before the two ranges could
- * even touch. */
+/*
+ * lwIP descriptors are private to the shim and are explicitly mapped from
+ * the title-visible nsysnet descriptors through mapped_fd[].
+ *
+ * Keep the internal lwIP descriptor range starting at zero so the complete
+ * 32-bit lwIP fd_set can be used. The title-visible descriptors remain real
+ * nsysnet placeholders and therefore retain the native Wii U fd 4..31
+ * exhaustion limit independently of the lwIP descriptor numbers.
+ */
 /*
  * Each queued UDP datagram consumes one struct netbuf.
  * lwIP defaults MEMP_NUM_NETBUF to only 2, which caused bursts such as
  * NEX/NNCS to keep the first two packets and silently drop the rest.
  */
 #define MEMP_NUM_NETBUF 32
-#define MEMP_NUM_NETCONN 16
-#define LWIP_SOCKET_OFFSET 16
+#define MEMP_NUM_NETCONN 32
+#define LWIP_SOCKET_OFFSET 0
 #define MEMP_NUM_TCPIP_MSG_INPKT 16
 #define LWIP_DNS 1
 #define LWIP_NETCONN 1
