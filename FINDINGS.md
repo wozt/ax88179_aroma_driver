@@ -2936,3 +2936,37 @@ TCPIP_THREAD_PRIO is restored to 1, which maps to Coreinit priority 5.
 
 The remaining high-rate loss is pursued in the UHS receive pipeline
 rather than through further lwIP scheduling changes.
+
+
+## Async UHS RX ring - WUMS section alignment load failure
+
+The first build of the three-slot asynchronous UHS RX ring compiled and
+linked successfully on the development PC, but WUMSLoader refused to
+load the module on the Wii U:
+
+    Failed to load/link/module homebrew_ax88179
+    MODULE_LINK_ERROR_ADDRESS_UNALIGNED
+
+This failure occurs before module execution.
+
+WUMSLoader's ModuleLinkInformationFactory checks every allocated ELF
+section against its sh_addralign value and returns
+MODULE_LINK_ERROR_ADDRESS_UNALIGNED when the relocated destination does
+not satisfy that alignment.
+
+The async RX patch introduced:
+
+    g_rx_async[...] __attribute__((aligned(0x100)))
+
+while the driver's existing successfully loaded UHS DMA buffers use
+0x40 alignment.
+
+The 0x100 declaration can therefore raise the containing ELF section
+alignment to 256 bytes, which WUMSLoader does not necessarily provide
+for the relocated data section.
+
+This is a module-layout/load failure, not yet evidence of any failure in
+UhsSubmitBulkRequestAsync or the asynchronous RX ring itself.
+
+The next build reduces the new RX DMA ring alignment from 0x100 to 0x40,
+matching the existing working UHS buffers.
