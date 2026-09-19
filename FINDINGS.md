@@ -30,7 +30,7 @@
 [ ] gethostbyaddr
 [ ] DNS async / variantes restantes
 [ ] NSSL Nintendo : détourner le transport TLS vers lwIP/AX
-[ ] hot-unplug / reconnect
+[✓] hot-unplug / reconnect
 [ ] perte/restauration link
 [ ] DHCP renew/recovery
 [✓] exhaustion sockets
@@ -750,3 +750,64 @@ alors que la boucle principale utilisait ensuite :
 
 Le test câble Ethernet suivant nécessite donc également de rendre ce test
 NULL-safe.
+
+
+## Hot-unplug USB / reconnect validé
+
+Le recovery automatique après arrachement physique du dongle AX88179 est
+maintenant fonctionnel.
+
+Scénario validé :
+
+    AX actif sur 192.168.2.190
+        |
+        v
+    débranchement physique USB
+        |
+        v
+    192.168.2.190 devient inaccessible
+        |
+        v
+    erreurs UHS / PHY détectées
+        |
+        v
+    netif arrêté
+        |
+        v
+    ancien handle UHS fermé
+        |
+        v
+    dongle rebranché sur le même port
+        |
+        v
+    nouvel open AX88179
+        |
+        v
+    initialisation PHY froide
+        |
+        v
+    ring RX async recréé
+        |
+        v
+    lease de session restaurée
+        |
+        v
+    192.168.2.190 répond à nouveau
+
+Logs observés :
+
+    AX: hotplug recovered 192.168.2.190
+    AX: ready 192.168.2.190
+    AX: udp-log 192.168.2.190
+
+Le ping est revenu automatiquement sans reboot ni changement de titre.
+
+La première réponse après recovery a subi environ 1 seconde de latence,
+puis les réponses suivantes sont revenues aux valeurs normales de quelques
+millisecondes.
+
+Le recovery a été observé plusieurs fois dans la même session.
+
+Conclusion :
+
+    hot-unplug / reconnect : VALIDÉ
