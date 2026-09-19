@@ -31,7 +31,7 @@
 [ ] DNS async / variantes restantes
 [ ] NSSL Nintendo : détourner le transport TLS vers lwIP/AX
 [✓] hot-unplug / reconnect
-[ ] perte/restauration link
+[✓] perte/restauration link
 [ ] DHCP renew/recovery
 [✓] exhaustion sockets
 [✓] exhaustion buffers (capacité native atteinte à débit soutenable)
@@ -811,3 +811,38 @@ Le recovery a été observé plusieurs fois dans la même session.
 Conclusion :
 
     hot-unplug / reconnect : VALIDÉ
+
+
+## Perte / restauration du link Ethernet validée
+
+Le câble RJ45 a été débranché puis rebranché en laissant le dongle
+AX88179 connecté en USB.
+
+Comportement observé lors de la perte du lien :
+
+    PHY: link=DOWN
+    AX: link/lease unavailable
+    AX: link=0 ...
+
+L'interface USB est restée ouverte et aucun recovery hotplug n'a été
+déclenché.
+
+Après rebranchement du câble :
+
+    PHY: link=UP
+    AX: ready 192.168.2.190
+    AX: udp-log 192.168.2.190
+
+Le ping vers 192.168.2.190 est revenu automatiquement sans :
+
+- reboot ;
+- changement de titre ;
+- réouverture UHS ;
+- intervention manuelle.
+
+La première réponse après restauration du lien a subi environ une seconde
+de latence, puis les réponses sont revenues à quelques millisecondes.
+
+Conclusion :
+
+    perte/restauration link : VALIDÉ
