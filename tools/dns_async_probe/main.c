@@ -1503,6 +1503,317 @@ static void run_clear_negative_probe(void)
         "=== END NATIVE NEGATIVE DNS CACHE TEST ===");
 }
 
+
+typedef int (*raw_dns_abort_fn)(
+    const char *hostname);
+
+static int start_fresh_native_async(
+    raw_getaddrinfo_fn fn,
+    raw_freeaddrinfo_fn native_free,
+    const char *const *candidates,
+    unsigned count,
+    const char **chosen_out)
+{
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    for (unsigned i = 0; i < count; i++) {
+        struct nsn_addrinfo *res = NULL;
+
+        int rc =
+            fn(candidates[i],
+               "80",
+               &hints,
+               &res);
+
+        if (rc == NSN_EAI_INPROGRESS) {
+            *chosen_out = candidates[i];
+            return rc;
+        }
+
+        if (rc == 0 && res)
+            native_free(res);
+    }
+
+    *chosen_out = NULL;
+    return 0x7fffffff;
+}
+
+static int poll_native_async_to_end(
+    raw_getaddrinfo_fn fn,
+    raw_freeaddrinfo_fn native_free,
+    const char *host,
+    int initial_rc,
+    int *attempts_out)
+{
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    int rc = initial_rc;
+    int attempts = 0;
+
+    OSTime deadline =
+        OSGetTime() +
+        OSMillisecondsToTicks(5000);
+
+    while (rc == NSN_EAI_INPROGRESS &&
+           OSGetTime() < deadline) {
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+
+        struct nsn_addrinfo *res = NULL;
+
+        rc =
+            fn(host,
+               "80",
+               &hints,
+               &res);
+
+        attempts++;
+
+        if (rc == 0 && res)
+            native_free(res);
+    }
+
+    if (attempts_out)
+        *attempts_out = attempts;
+
+    return rc;
+}
+
+static void run_dns_abort_probe(void)
+{
+    probe_say("%s", "");
+    probe_say(
+        "=== NATIVE DNS ABORT BY HNAME TEST ===");
+
+    raw_getaddrinfo_fn async_fn =
+        (raw_getaddrinfo_fn)find_export_addr(
+            "getaddrinfo_async");
+
+    raw_freeaddrinfo_fn native_free =
+        (raw_freeaddrinfo_fn)find_export_addr(
+            "freeaddrinfo");
+
+    raw_dns_abort_fn abort_fn =
+        (raw_dns_abort_fn)find_export_addr(
+            "dns_abort_by_hname");
+
+    if (!async_fn ||
+        !native_free ||
+        !abort_fn) {
+
+        probe_say(
+            "DNS-ABORT missing native export");
+        return;
+    }
+
+    /*
+     * Several positive hostnames are provided because the native/IOSU
+     * resolver may retain cache entries across earlier probe activity.
+     *
+     * We only use a hostname whose FIRST call returns EAI_INPROGRESS.
+     */
+    static const char *abort_candidates[] = {
+        "www.rust-lang.org",
+        "www.gentoo.org",
+        "www.postgresql.org",
+        "www.opensuse.org"
+    };
+
+    static const char *control_candidates[] = {
+        "www.llvm.org",
+        "www.python.org",
+        "www.x.org",
+        "www.apache.org"
+    };
+
+    const char *abort_host = NULL;
+
+    int start_rc =
+        start_fresh_native_async(
+            async_fn,
+            native_free,
+            abort_candidates,
+            sizeof(abort_candidates) /
+                sizeof(abort_candidates[0]),
+            &abort_host);
+
+    if (start_rc != NSN_EAI_INPROGRESS ||
+        !abort_host) {
+
+        probe_say(
+            "DNS-ABORT INCONCLUSIVE: no fresh abort hostname");
+
+        probe_say(
+            "=== END NATIVE DNS ABORT BY HNAME TEST ===");
+        return;
+    }
+
+    probe_say(
+        "DNS-ABORT started host=%s rc=%d",
+        abort_host,
+        start_rc);
+
+    /*
+     * Call abort immediately while the query is known to be pending.
+     */
+    OSTime abort_begin =
+        OSGetTime();
+
+    int abort_rc =
+        abort_fn(abort_host);
+
+    uint64_t abort_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - abort_begin);
+
+    probe_say(
+        "DNS-ABORT call host=%s rc=%d ms=%llu",
+        abort_host,
+        abort_rc,
+        (unsigned long long)abort_ms);
+
+    /*
+     * No polling for 750 ms:
+     *
+     * - if abort failed to stop the request, its successful DNS answer
+     *   should normally be in the resolver cache;
+     *
+     * - if abort really cancelled it, the next getaddrinfo_async should
+     *   normally have to start again and return EAI_INPROGRESS.
+     */
+    OSSleepTicks(
+        OSMillisecondsToTicks(750));
+
+    struct nsn_addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+
+    hints.ai_family = 2;
+    hints.ai_socktype = 1;
+    hints.ai_protocol = 6;
+
+    struct nsn_addrinfo *res = NULL;
+
+    OSTime poll_begin =
+        OSGetTime();
+
+    int after_abort =
+        async_fn(
+            abort_host,
+            "80",
+            &hints,
+            &res);
+
+    uint64_t poll_ms =
+        OSTicksToMilliseconds(
+            OSGetTime() - poll_begin);
+
+    probe_say(
+        "DNS-ABORT after 750ms rc=%d ms=%llu res=%08x",
+        after_abort,
+        (unsigned long long)poll_ms,
+        (unsigned)(uintptr_t)res);
+
+    if (after_abort == 0 && res) {
+        native_free(res);
+        res = NULL;
+    }
+
+    int abort_completion_attempts = 0;
+
+    int abort_final =
+        poll_native_async_to_end(
+            async_fn,
+            native_free,
+            abort_host,
+            after_abort,
+            &abort_completion_attempts);
+
+    probe_say(
+        "DNS-ABORT final=%d extra_attempts=%d",
+        abort_final,
+        abort_completion_attempts);
+
+    /*
+     * Control: repeat the same experiment without dns_abort_by_hname.
+     * A normal positive lookup should be complete after the same 750 ms.
+     */
+    const char *control_host = NULL;
+
+    int control_start =
+        start_fresh_native_async(
+            async_fn,
+            native_free,
+            control_candidates,
+            sizeof(control_candidates) /
+                sizeof(control_candidates[0]),
+            &control_host);
+
+    if (control_start != NSN_EAI_INPROGRESS ||
+        !control_host) {
+
+        probe_say(
+            "DNS-ABORT CONTROL INCONCLUSIVE: no fresh hostname");
+
+        probe_say(
+            "=== END NATIVE DNS ABORT BY HNAME TEST ===");
+        return;
+    }
+
+    probe_say(
+        "DNS-ABORT control started host=%s rc=%d",
+        control_host,
+        control_start);
+
+    OSSleepTicks(
+        OSMillisecondsToTicks(750));
+
+    res = NULL;
+
+    int control_after =
+        async_fn(
+            control_host,
+            "80",
+            &hints,
+            &res);
+
+    probe_say(
+        "DNS-ABORT control after 750ms rc=%d res=%08x",
+        control_after,
+        (unsigned)(uintptr_t)res);
+
+    if (control_after == 0 && res)
+        native_free(res);
+
+    int control_attempts = 0;
+
+    int control_final =
+        poll_native_async_to_end(
+            async_fn,
+            native_free,
+            control_host,
+            control_after,
+            &control_attempts);
+
+    probe_say(
+        "DNS-ABORT control final=%d extra_attempts=%d",
+        control_final,
+        control_attempts);
+
+    probe_say(
+        "=== END NATIVE DNS ABORT BY HNAME TEST ===");
+}
+
 static void run_shim_dns_probe(void)
 {
     probe_say("%s", "");
@@ -1724,6 +2035,8 @@ int main(void)
     run_clear_pending_probe();
 
     run_clear_negative_probe();
+
+    run_dns_abort_probe();
 
     run_shim_dns_probe();
 
