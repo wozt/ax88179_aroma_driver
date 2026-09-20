@@ -41,6 +41,8 @@
 
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
+#include <coreinit/title.h>
+#include <nn/result.h>
 #include <function_patcher/function_patching.h>
 #include <whb/log.h>
 
@@ -628,9 +630,11 @@ static void shim_exit_trace(const char *msg)
 
     fprintf(
         f,
-        "[%llu] %s\n",
+        "[%llu] title=%016llx %s\n",
         (unsigned long long)
             OSTicksToMilliseconds(OSGetTime()),
+        (unsigned long long)
+            OSGetTitleID(),
         msg);
 
     fflush(f);
@@ -657,6 +661,35 @@ DECL_FUNCTION(void, socket_lib_finish, void)
     real_socket_lib_finish();
 
     shim_exit_trace("socket_lib_finish end");
+}
+
+DECL_FUNCTION(NNResult, ACClose, void)
+{
+    shim_exit_trace("ACClose begin");
+
+    NNResult result =
+        real_ACClose();
+
+    char line[96];
+
+    snprintf(
+        line,
+        sizeof(line),
+        "ACClose end result=%d",
+        result.value);
+
+    shim_exit_trace(line);
+
+    return result;
+}
+
+DECL_FUNCTION(void, ACFinalize, void)
+{
+    shim_exit_trace("ACFinalize begin");
+
+    real_ACFinalize();
+
+    shim_exit_trace("ACFinalize end");
 }
 
 /* ------------------------------------------------------------------ */
@@ -4721,6 +4754,44 @@ int nsysnet_shim_install(void)
     SHIM_PATCH_PROCESS(
         socket_lib_finish,
         FP_TARGET_PROCESS_WII_U_MENU);
+
+    /*
+     * Diagnose WUT socket finalisation:
+     *
+     *   ACClose()
+     *   ACFinalize()
+     *   socket devoptab removal
+     *   socket_lib_finish()
+     */
+    {
+        function_replacement_data_t d =
+            REPLACE_FUNCTION_FOR_PROCESS(
+                ACClose,
+                LIBRARY_NN_AC,
+                ACClose,
+                FP_TARGET_PROCESS_WII_U_MENU);
+
+        if (add_patch(
+                &d,
+                "ACClose",
+                FP_TARGET_PROCESS_WII_U_MENU) < 0)
+            goto fail;
+    }
+
+    {
+        function_replacement_data_t d =
+            REPLACE_FUNCTION_FOR_PROCESS(
+                ACFinalize,
+                LIBRARY_NN_AC,
+                ACFinalize,
+                FP_TARGET_PROCESS_WII_U_MENU);
+
+        if (add_patch(
+                &d,
+                "ACFinalize",
+                FP_TARGET_PROCESS_WII_U_MENU) < 0)
+            goto fail;
+    }
 
     SHIM_PATCH(socket);
     SHIM_PATCH(socketclose);
