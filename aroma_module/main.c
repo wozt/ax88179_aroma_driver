@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.42-trace-ac-fini");
+WUMS_MODULE_VERSION("0.2.43-defer-all-ends-cleanup");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -54,9 +54,11 @@ static void exit_trace(const char *msg)
 
     fprintf(
         f,
-        "[%llu] %s\n",
+        "[%llu] title=%016llx %s\n",
         (unsigned long long)
             OSTicksToMilliseconds(OSGetTime()),
+        (unsigned long long)
+            OSGetTitleID(),
         msg);
 
     fflush(f);
@@ -672,84 +674,22 @@ static void stop_after_all_application_ends(void)
     if (!started)
         return;
 
-    AX_LOG("ALL_APPLICATION_ENDS_DONE title=%016llx stopping",
-           (unsigned long long)OSGetTitleID());
-
-    exit_trace("ALL_APPLICATION_ENDS_DONE entered");
-
-    atomic_store_explicit(
-        &title_ending,
-        true,
-        memory_order_release);
-
-    atomic_store_explicit(
-        &stopping,
-        true,
-        memory_order_release);
-
-    exit_trace("worker stop signalled");
-
     /*
-     * Relay shutdown can consume up to roughly 500 ms and tcpip shutdown
-     * another ~100 ms. Give the worker a comfortable ceiling here.
+     * Diagnostic 0.2.43:
+     *
+     * Do NOT stop AX/lwIP/UHS here.
+     *
+     * WUMSLoader invokes ALL_APPLICATION_ENDS_DONE once per module.
+     * Returning from this function does not mean the global hook phase
+     * has completed. A later module may still need networking during its
+     * own ALL_APPLICATION_ENDS_DONE callback.
      */
-    for (int i = 0;
-         i < 200 &&
-         !OSIsThreadTerminated(&worker);
-         ++i) {
+    AX_LOG(
+        "ALL_APPLICATION_ENDS_DONE title=%016llx defer-cleanup",
+        (unsigned long long)OSGetTitleID());
 
-        OSSleepTicks(
-            OSMillisecondsToTicks(10));
-    }
-
-    exit_trace_int(
-        "worker terminated after wait=",
-        OSIsThreadTerminated(&worker) ? 1 : 0);
-
-    if (OSIsThreadTerminated(&worker)) {
-        exit_trace("before worker join");
-
-        OSJoinThread(&worker, NULL);
-
-        exit_trace("after worker join");
-    } else {
-        exit_trace("worker still alive after 2s");
-
-        AX_LOG("ALL_APPLICATION_ENDS_DONE worker still alive");
-    }
-
-    /*
-     * The watchdog is cooperative since 0.2.36 and checks stopping every
-     * 100 ms.
-     */
-    if (watchdog_started) {
-        for (int i = 0;
-             i < 50 &&
-             !OSIsThreadTerminated(&watchdog);
-             ++i) {
-
-            OSSleepTicks(
-                OSMillisecondsToTicks(10));
-        }
-
-        exit_trace_int(
-            "watchdog terminated after wait=",
-            OSIsThreadTerminated(&watchdog) ? 1 : 0);
-
-        if (OSIsThreadTerminated(&watchdog)) {
-            exit_trace("before watchdog join");
-
-            OSJoinThread(&watchdog, NULL);
-
-            exit_trace("after watchdog join");
-        }
-
-        watchdog_started = 0;
-    }
-
-    started = 0;
-
-    exit_trace("ALL_APPLICATION_ENDS_DONE returning");
+    exit_trace(
+        "ALL_APPLICATION_ENDS_DONE defer-cleanup returning");
 }
 
 
