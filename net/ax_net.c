@@ -353,11 +353,18 @@ int ax_net_poll(void)
      * return to UHS as quickly as possible.
      */
     drain_tx(iface.state, 1);
-    /* The read paces the loop when it actually waits. Sleep only if it
-     * came back far too fast to have waited, so a UHS that ignores the
-     * timeout cannot turn this into a spin. */
-    if (n <= 0 && ax88179_last_bulk_us(iface.state) < 1500)
-        OSSleepTicks(OSMillisecondsToTicks(2));
+    /*
+     * RX is fully asynchronous now. ax88179_receive() only harvests
+     * completed UHS slots; it no longer performs a blocking bulk-IN wait.
+     *
+     * Do not keep the old 2 ms idle sleep here. At ~147 Mbit/s, sleeping
+     * for 2 ms after observing an incomplete slot can allow all pending
+     * DMA slots and the device FIFO to fill before the worker runs again.
+     *
+     * This busy-poll behavior is currently intentional for RX burst
+     * characterization. If it closes the high-rate loss gap, replace it
+     * with callback-driven or adaptive pacing afterward.
+     */
     return n;
 }
 
