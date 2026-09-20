@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.33-nssl-tracking");
+WUMS_MODULE_VERSION("0.2.34-graceful-title-exit");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -513,29 +513,27 @@ cleanup:
     return 0;
 }
 
-static void request_stop_worker(void)
+static void note_exit_requested(void)
 {
     if (!started) return;
 
     /*
-     * APPLICATION_REQUESTS_EXIT is called synchronously from Aroma's
-     * OSReceiveMessage hook. Never wait for USB/lwIP/NSSL from there.
-     *
-     * Log before quiescing: the UDP logger itself is AX-backed and becomes
-     * intentionally unusable as soon as the title is detached from lwIP.
+     * REQUESTS_EXIT means the title has only been asked to leave.
+     * Keep AX/lwIP/NSSL fully alive until __PPCExit/APPLICATION_ENDS.
      */
-    AX_LOG("REQUESTS_EXIT title=%016llx",
+    AX_LOG("REQUESTS_EXIT title=%016llx keep-network-alive",
            (unsigned long long)OSGetTitleID());
-
-    nsysnet_shim_quiesce();
-    atomic_store_explicit(&stopping, true, memory_order_release);
 }
 
 static void stop_worker(void)
 {
     if (!started) return;
 
-    request_stop_worker();
+    AX_LOG("APPLICATION_ENDS title=%016llx stopping-network",
+           (unsigned long long)OSGetTitleID());
+
+    nsysnet_shim_quiesce();
+    atomic_store_explicit(&stopping, true, memory_order_release);
     /* Bounded join: a worker stuck in an ioctl must not deadlock the
      * whole app transition (that hangs the boot splash). Give it 2 s,
      * then leave the thread to die with the process. */
@@ -612,7 +610,7 @@ WUMS_APPLICATION_STARTS()
     }
 }
 
-WUMS_APPLICATION_REQUESTS_EXIT() { request_stop_worker(); }
+WUMS_APPLICATION_REQUESTS_EXIT() { note_exit_requested(); }
 WUMS_APPLICATION_ENDS() { stop_worker(); }
 WUMS_DEINITIALIZE() { stop_worker(); }
 

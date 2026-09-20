@@ -3065,15 +3065,15 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
 DECL_FUNCTION(int32_t, NSSLDestroyConnection,
               int32_t connection)
 {
-    int tracked =
-        nssl_shutdown_connection_transport(
-            connection,
-            "destroy");
-
+    /*
+     * Keep the localhost transport alive while Nintendo NSSL performs
+     * its own TLS shutdown. Previously we forced SHUT_RDWR here, causing
+     * NSSL_ERROR_SSL_SHUTDOWN_ERROR (-0x28001e).
+     */
     WHBLogPrintf(
-        "AX: NSSLDestroyConnection begin conn=%d tracked=%d",
+        "AX: NSSLDestroyConnection begin conn=%d mask=%08x",
         connection,
-        tracked);
+        (unsigned)atomic_load(&nssl_public_mask));
 
     int32_t result =
         real_NSSLDestroyConnection(
@@ -3112,11 +3112,9 @@ DECL_FUNCTION(int32_t, NSSLDestroyConnection,
  */
 DECL_FUNCTION(int32_t, NSSLFinish, void)
 {
-    nssl_shutdown_all_tracked(
-        "finish");
-
     WHBLogPrintf(
-        "AX: NSSLFinish begin");
+        "AX: NSSLFinish begin mask=%08x",
+        (unsigned)atomic_load(&nssl_public_mask));
 
     int32_t result =
         real_NSSLFinish();
@@ -3124,6 +3122,8 @@ DECL_FUNCTION(int32_t, NSSLFinish, void)
     WHBLogPrintf(
         "AX: NSSLFinish end result=%d",
         result);
+
+    nssl_relay_stop_all();
 
     atomic_store(
         &nssl_public_mask,
