@@ -612,6 +612,53 @@ static int compat_get_int(void *optval, socklen_t *optlen, int value)
     return 0;
 }
 
+/*
+ * Persistent exit trace.
+ *
+ * This hook runs before WUMS_HOOK_FINI_WUT_DEVOPTAB, so the SD devoptab
+ * should still be alive even if nsysnet itself is currently shutting down.
+ */
+static void shim_exit_trace(const char *msg)
+{
+    FILE *f =
+        fopen("fs:/vol/external01/ax88179_exit.log", "a");
+
+    if (!f)
+        return;
+
+    fprintf(
+        f,
+        "[%llu] %s\n",
+        (unsigned long long)
+            OSTicksToMilliseconds(OSGetTime()),
+        msg);
+
+    fflush(f);
+    fclose(f);
+}
+
+/*
+ * Diagnostic hook only.
+ *
+ * WUT's __fini_wut_socket() does:
+ *
+ *   ACClose()
+ *   ACFinalize()
+ *   __wut_socket_fini_devoptab()
+ *   socket_lib_finish()
+ *
+ * If "begin" appears but "end" does not, socket_lib_finish itself hangs.
+ * If neither appears, the hang is earlier in __fini_wut_socket().
+ */
+DECL_FUNCTION(void, socket_lib_finish, void)
+{
+    shim_exit_trace("socket_lib_finish begin");
+
+    real_socket_lib_finish();
+
+    shim_exit_trace("socket_lib_finish end");
+}
+
 /* ------------------------------------------------------------------ */
 /* sockets                                                             */
 
@@ -4666,6 +4713,14 @@ int nsysnet_shim_install(void)
     uint32_t version = 0;
     FunctionPatcher_GetVersion(&version);
     SHIM_TRACE(2, "FunctionPatcher v%u", version);
+
+    /*
+     * Diagnostic only: trace WUT socket teardown for Wii U Menu.
+     * One process only, therefore this adds exactly one patch handle.
+     */
+    SHIM_PATCH_PROCESS(
+        socket_lib_finish,
+        FP_TARGET_PROCESS_WII_U_MENU);
 
     SHIM_PATCH(socket);
     SHIM_PATCH(socketclose);
