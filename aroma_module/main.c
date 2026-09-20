@@ -22,7 +22,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.29-ftp-nssl-lifecycle");
+WUMS_MODULE_VERSION("0.2.30-safe-boot");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -509,28 +509,7 @@ WUMS_INITIALIZE(args)
 WUMS_APPLICATION_STARTS()
 {
     if (started) return;
-
     nsysnet_shim_begin_title();
-
-#if !AX_DISABLE_SHIM
-    /*
-     * Register the GAME/Menu hooks immediately, before WUPS plugins such as
-     * FTPiiU create their long-lived listeners.
-     *
-     * This is safe before AX is ready: socket/DNS hooks already fall back to
-     * native nsysnet when ax_net_stack_ready() is false.  The early FTP :21
-     * bind is the one intentional exception; it can wait for AX and adopt
-     * its native descriptor once the stack obtains an address.
-     */
-    nsysnet_shim_set_trace_level(config_shim_trace);
-    nsysnet_shim_set_system_dns(config_system_dns);
-    nsysnet_shim_set_force_native(config_force_native);
-    nsysnet_shim_set_nssl_bridge(config_nssl_bridge);
-
-    if (nsysnet_shim_install() != 0)
-        AX_LOG("FAILED to arm early shim hooks");
-#endif
-
     atomic_store_explicit(&stopping, false, memory_order_release);
     /* Core 2, not "any". Everything this module runs is background work,
      * and a thread of ours that spins must not be able to starve the
