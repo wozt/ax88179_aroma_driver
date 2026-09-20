@@ -2281,49 +2281,6 @@ static int nssl_public_fd_is_loopback(int fd)
 /*
  * Wake all transports belonging to one Nintendo NSSL handle.
  */
-static int nssl_shutdown_connection_transport(
-    int32_t connection,
-    const char *reason)
-{
-    uint32_t mask =
-        atomic_load(&nssl_public_mask);
-
-    int count = 0;
-
-    for (int fd = 0; fd < 32; ++fd) {
-        if (!(mask & (1u << fd)))
-            continue;
-
-        if (atomic_load(
-                &nssl_connection_by_fd[fd]) !=
-            connection)
-            continue;
-
-        if (!nssl_public_fd_is_loopback(fd)) {
-            nssl_untrack_public_fd(fd);
-            continue;
-        }
-
-        WHBLogPrintf(
-            "AX: NSSL %s shutdown conn=%d fd=%d",
-            reason,
-            connection,
-            fd);
-
-        real_shutdown(
-            fd,
-            SHUT_RDWR);
-
-        count++;
-    }
-
-    return count;
-}
-
-
-/*
- * Wake EVERY NSSL transport still alive for the title.
- */
 static int nssl_shutdown_all_tracked(
     const char *reason)
 {
