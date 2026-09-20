@@ -48,11 +48,11 @@ For installation, configuration and general project information, see [README.md]
 * Buffer exhaustion recovery
 * Sustained concurrent TCP/UDP traffic
 * Real game networking through Pretendo
+* Highest-rate RX burst parity (~147 Mbit/s)
 
 ### ⏳ Still open
 
 * DHCP renew/rebind at real lease expiry
-* Highest-rate RX burst parity (~147 Mbit/s)
 * Wii U Menu networking
 * Browser networking
 * HOME Menu / eShop / Download Manager networking
@@ -505,42 +505,44 @@ real DHCP lease expiry / renew / rebind
 
 # RX pipeline
 
-Current driver:
+The driver uses three asynchronous UHS bulk-IN requests: ```text RX_ASYNC_SLOTS = 3
 
-```text
-RX_ASYNC_SLOTS = 3
-```
+Each UHS completion signals an auto-reset OSEvent, immediately waking the network worker.
 
-Three asynchronous UHS bulk-IN requests are kept in flight.
+The RX path is therefore:
 
-The completion path:
-
-```text
-USB DMA completion
+UHS async completion
     |
-copy completed aggregate
+    v
+OSSignalEvent()
     |
-immediately rearm USB slot
+    v
+network worker wakes
     |
-parse AX aggregate
+    v
+DMA slot is rearmed
     |
-submit Ethernet frames to lwIP
-```
+    v
+AX aggregate is parsed
+    |
+    v
+frames are submitted to lwIP
 
-DMA buffers are `0x40` aligned.
+The previous 2 ms polling delay was identified as the cause of packet loss during high-rate bursts.
 
-The asynchronous ring dramatically improved high-rate receive performance.
+After replacing the delay with callback-driven wakeups, the high-rate UDP test reaches full parity:
 
-At sustainable rates, the full UDP capacity test reaches:
-
-```text
+~147 Mbit/s:
 368 / 368 packets
-```
+515200 bytes
 
-At approximately `147 Mbit/s` payload rate, packet loss still occurs.
+recovery:
+8 / 8 sockets
+24 / 24 packets
 
-This is now considered a performance-path issue rather than a socket-buffer-capacity issue.
+The same full result is reproduced across all three tested send rates.
 
+High-rate RX burst parity is therefore validated.
 ---
 
 # Current lwIP configuration
