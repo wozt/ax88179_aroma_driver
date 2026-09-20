@@ -1,91 +1,172 @@
 # AX88179 Aroma Driver
 
-Experimental **AX88179 / AX88178A USB Ethernet driver for the Nintendo Wii U**, designed to run as an [Aroma](https://aroma.foryour.cafe/) background module.
+Experimental **ASIX AX88179 USB Ethernet driver for the Nintendo Wii U**, implemented as an Aroma/WUMS background module.
 
-The project provides a native AX88179 USB driver, a dedicated **lwIP network stack**, and an experimental `nsysnet` socket shim allowing Wii U homebrew and titles to communicate through the USB Ethernet adapter.
+The project provides:
+
+* a native user-mode AX88179 USB driver;
+* a dedicated lwIP TCP/IP stack;
+* an Aroma `nsysnet.rpl` compatibility shim;
+* Nintendo NSSL/TLS transport through the AX88179.
 
 > [!IMPORTANT]
 > This project is still experimental.
 >
-> Basic Ethernet networking is functional, including DHCP, ICMP, TCP and UDP. Transparent system-wide Wii U networking is **not implemented yet**.
+> Networking for Wii U games and homebrew running as the **GAME process** is already functional and has been validated with real online games.
+>
+> It is **not yet a complete system-wide Ethernet replacement**. Wii U system applications such as the Menu, Browser and eShop are the next major integration target.
 
 ---
 
 ## Current status
 
-### Working
+### ✅ Working and hardware-tested
 
-* [x] AX88179 USB detection and initialization
-* [x] MAC address retrieval
-* [x] Ethernet link detection
-* [x] Ethernet RX
-* [x] Ethernet TX
-* [x] lwIP integration
-* [x] DHCP
-* [x] ICMP / ping
-* [x] TCP
-* [x] UDP
-* [x] Experimental `nsysnet` socket interception
-* [x] TCP/UDP traffic from a Wii U homebrew routed through the AX88179 interface
-* [x] Configurable DHCP behavior through `SD:/wiiu/ax88179/config.ini`.
-* [x] Optional session-level DHCP lease caching for faster network recovery after title transitions.
-* [x] Network worker stop/restart across title transitions while retaining the first successful DHCP configuration for the current Aroma session.
-* [x] Fast warm PHY reopen across title transitions, with PHY validation and automatic cold-reset fallback.
-* [x] Compact timestamped module/PHY diagnostics and configurable shim tracing.
-* [x] Minecraft: Wii U Edition networking through the AX88179/lwIP path
-* [x] Pretendo compatibility with native/system DNS retained for Inkay
-* [x] Minecraft map creation successfully validated with `route=ax` and `shim_trace=0`
-* [x] Diagnostic `route=native` mode for comparison with the original Wii U networking stack
+* AX88179 USB detection and initialization
+* MAC address retrieval
+* PHY initialization
+* Ethernet RX / TX
+* Asynchronous USB RX
+* IPv4 / ARP
+* DHCP
+* ICMP / ping
+* TCP
+* UDP
+* TCP server sockets
+* Nonblocking sockets
+* `select`
+* Native + AX socket coexistence
+* Socket option compatibility
+* TCP send/receive backpressure
+* UDP receive-buffer accounting
+* Multicast
+* Wii U multi-datagram socket APIs
+* Synchronous DNS
+* Asynchronous DNS
+* Reverse IPv4 DNS
+* Nintendo NSSL/TLS over AX88179
+* USB hot-unplug/replug recovery
+* Ethernet link loss/recovery
+* DHCP recovery after interface recreation
+* Prolonged concurrent TCP/UDP traffic
 
+### 🎮 Real-game validation
 
-### Experimental / incomplete
+* Minecraft: Wii U Edition + Pretendo
+* Super Mario Maker + Pretendo
+* Super Smash Bros. for Wii U + Pretendo
+* Real Smash matchmaking and complete online match
 
-* [ ] Reliable networking across every title transition
-* [ ] Broad Wii U game compatibility
-* [ ] Transparent NSSL/TLS support
-* [ ] Wii U system services
-* [ ] Wii U Menu networking
-* [ ] Browser / eShop networking — the Wii U Browser has been observed continuing to use the native Wi-Fi interface rather than the current GAME-process shim
-* [ ] Fully transparent system-wide Ethernet replacement
+### 🚧 Still in development
+
+* Wii U Menu networking
+* Browser networking
+* HOME Menu / eShop / Download Manager networking
+* Root/system process support
+* Wi-Fi-free system operation
+* DHCP renew/rebind validation
+* Maximum-rate RX burst parity
+* Wider game compatibility
+
+---
+
+## Hardware support
+
+The current driver explicitly matches:
+
+```text
+VID:PID = 0b95:1790
+ASIX AX88179
+```
+
+Other ASIX USB Ethernet controllers should not be assumed compatible unless explicitly added and tested.
 
 ---
 
 ## Architecture
 
+### Normal sockets
+
 ```text
-                 Wii U application / game
-                           │
-                           │ nsysnet API
-                           ▼
-                  ┌──────────────────┐
-                  │  nsysnet shim    │
-                  │ FunctionPatcher  │
-                  └────────┬─────────┘
-                           │
-                           ▼
-                     ┌──────────┐
-                     │   lwIP   │
-                     │ TCP/IP   │
-                     └────┬─────┘
-                          │
-                          ▼
-                 ┌─────────────────┐
-                 │ AX88179 driver  │
-                 └────────┬────────┘
-                          │
-                          ▼
-                    Wii U UHS API
-                          │
-                          ▼
-                     USB Ethernet
-                          │
-                          ▼
-                 AX88179 / AX88178A
+Wii U game / homebrew
+        |
+        | nsysnet API
+        v
++----------------------+
+| Aroma nsysnet shim   |
+| FunctionPatcher      |
++----------+-----------+
+           |
+           v
++----------------------+
+| lwIP TCP/IP stack    |
++----------+-----------+
+           |
+           v
++----------------------+
+| AX88179 driver       |
++----------+-----------+
+           |
+           v
+       Wii U UHS
+           |
+           v
+      USB Ethernet
 ```
 
-The Aroma module applies the required IOSU endpoint ownership patch, initializes the USB Ethernet adapter, starts its own lwIP stack and can optionally intercept `nsysnet.rpl` socket functions.
+The shim currently targets:
 
-The AX88179 driver and lwIP stack are independent from the Wii U's native network interface.
+```text
+FP_TARGET_PROCESS_GAME
+```
+
+Only sockets created by the shim are routed through AX/lwIP.
+
+Existing native sockets remain native.
+
+---
+
+## Nintendo NSSL / TLS
+
+Nintendo NSSL cannot directly consume a private lwIP descriptor.
+
+The project solves this without replacing Nintendo's TLS stack.
+
+```text
+Game
+ |
+ v
+Nintendo NSSL / IOS-NSEC
+ |
+ v
+native nsysnet socket
+ |
+ v
+127.0.0.1
+ |
+ v
+PPC relay
+ |
+ v
+lwIP socket
+ |
+ v
+AX88179
+ |
+ v
+Internet / Pretendo
+```
+
+Nintendo still owns:
+
+* TLS
+* certificates
+* handshakes
+* NSSL state
+
+The relay only transports the encrypted byte stream.
+
+This path is working in real games.
 
 ---
 
@@ -93,27 +174,17 @@ The AX88179 driver and lwIP stack are independent from the Wii U's native networ
 
 ```text
 .
-├── aroma_module/       Aroma/WUMS module and nsysnet shim
-├── driver/             AX88179 USB Ethernet driver
-├── net/                lwIP ↔ AX88179 integration
+├── aroma_module/       WUMS module and nsysnet/NSSL shim
+├── driver/             AX88179 USB driver
+├── net/                lwIP integration
 │   └── port/           Wii U/coreinit lwIP port
-├── common/             Shared Wii U helper code
-├── tests/              Host and Wii U tests
-├── tools/              Development, deployment and diagnostic utilities
+├── common/             Shared probe/helper code
+├── tests/              Host-side tests
+├── tools/              Wii U probes and development tools
 ├── vendor/             Vendored dependencies
-├── FINDINGS.md         Development notes and reverse-engineering findings
+├── FINDINGS.md         Reverse-engineering and validation notes
 └── README.md
 ```
-
-The main implementation lives in:
-
-```text
-driver/
-net/
-aroma_module/
-```
-
-Diagnostic programs and historical bring-up tests are kept separately from the production module.
 
 ---
 
@@ -121,7 +192,7 @@ Diagnostic programs and historical bring-up tests are kept separately from the p
 
 A Wii U running **Aroma** is required.
 
-For building, you need a Wii U homebrew development environment including:
+Build dependencies include:
 
 * devkitPro
 * devkitPPC
@@ -131,59 +202,36 @@ For building, you need a Wii U homebrew development environment including:
 * libfunctionpatcher
 * lwIP
 
-The project expects `DEVKITPRO` to be configured in your environment.
-
-For example:
+Example environment:
 
 ```bash
 export DEVKITPRO=/opt/devkitpro
-```
-
-Some dependencies are expected under:
-
-```text
-vendor/
-├── wums/
-├── libmocha/
-├── functionpatcher/
-└── lwip/
 ```
 
 ---
 
 ## Building
 
-Build the Aroma module with:
+Build the normal module with the `nsysnet` shim enabled:
 
 ```bash
 cd aroma_module
-make
-```
-
-The default configuration enables the experimental `nsysnet` shim.
-
-Explicitly build it with:
-
-```bash
-make SHIM=1
-```
-
-To build the Ethernet driver/lwIP module without socket interception:
-
-```bash
-make SHIM=0
-```
-
-Clean the build with:
-
-```bash
 make clean
+make SHIM=1 -j"$(nproc)"
 ```
 
-The resulting Aroma module is:
+Result:
 
 ```text
 AX88179Module.wms
+```
+
+To build only the Ethernet/lwIP module without socket interception:
+
+```bash
+cd aroma_module
+make clean
+make SHIM=0 -j"$(nproc)"
 ```
 
 ---
@@ -199,221 +247,508 @@ AX88179Module.wms
 to:
 
 ```text
-sd:/wiiu/environments/aroma/modules/
+SD:/wiiu/environments/aroma/modules/AX88179Module.wms
 ```
 
-Then reboot the Wii U into Aroma.
+Then reboot into Aroma.
 
-The module is loaded automatically by the environment; no application needs to be launched manually.
-
-When socket interception is enabled, Aroma's **FunctionPatcher module** must also be installed.
+The FunctionPatcher Aroma module is required when the `nsysnet` shim is enabled.
 
 ---
 
 ## Configuration
 
-The module configuration file is located at:
+Configuration file:
 
 ```text
 SD:/wiiu/ax88179/config.ini
 ```
 
-DHCP behavior can be configured with:
+Recommended development configuration:
 
 ```ini
 [dhcp]
+mode=keep_first
+
+[debug]
+shim_trace=0
+
+[compat]
+dns=ax
+route=ax
+nssl=bridge
+```
+
+### DHCP
+
+```ini
 mode=keep_first
 ```
 
 Available modes:
 
-* `keep_first` — perform DHCP once, then reuse the first successful IPv4 configuration across title transitions for the remainder of the Aroma session.
-* `always` — perform a new DHCP negotiation after every title transition.
+* `keep_first` — keep the first successful IPv4 configuration for the current Aroma session and reuse it across title transitions.
+* `always` — perform DHCP again when the AX network interface is recreated.
 
-`keep_first` only caches the configuration in RAM. A full console reboot clears it and causes DHCP to run normally again.
+A full console reboot clears the cached session configuration.
 
-Shim logging is configured in the same file:
+---
+
+### Route selection
 
 ```ini
-[debug]
-shim_trace=1
+route=ax
 ```
 
-Trace levels:
+Values:
 
-* `0` — disable normal shim tracing.
-* `1` — trace normal socket activity such as socket/connect/close and related calls.
-* `2` — verbose debugging, including FunctionPatcher registration details.
-
----
-
-## Fast title-transition recovery
-
-The network worker is deliberately stopped and recreated across Wii U title transitions.
-
-Keeping the worker permanently alive was tested and rejected because UHS/lwIP state cannot safely be assumed to survive the title lifecycle.
-
-The current implementation combines:
-
-* a `25 s` guard for the first worker of an Aroma boot;
-* a `2 s` guard for later title transitions;
-* session-level DHCP lease caching in `keep_first` mode;
-* warm PHY reuse when the existing PHY state is still valid.
-
-Measured on the development setup, a cold PHY link took roughly 3.1 seconds to renegotiate, while a validated warm reopen recovered the existing link in roughly 13-15 ms.
-
-If warm PHY validation fails, the driver automatically falls back to the normal cold power-reset and autonegotiation path.
+* `ax` — route compatible GAME-process sockets through lwIP/AX88179.
+* `native` — diagnostic mode using the original Wii U network stack.
 
 ---
 
-## Debugging
+### DNS
 
-The module outputs diagnostic messages through the Wii U logging facilities.
+```ini
+dns=ax
+```
 
-They can be monitored from a computer using `udplogserver`.
+Values:
 
-A successful initialization should eventually show the AX88179 interface obtaining a DHCP lease.
+* `ax` — use the AX/lwIP resolver implementation.
+* `system` — leave DNS resolution on the native Wii U resolver.
 
-Typical compact logs look like:
+AX mode supports the DNS APIs currently required by the tested titles, including asynchronous resolution.
+
+The current Pretendo hostname rewrite logic is development-oriented and does not yet provide a generic replacement for every possible custom Inkay configuration.
+
+---
+
+### NSSL
+
+```ini
+nssl=bridge
+```
+
+Values:
+
+* `bridge` — Nintendo NSSL uses the localhost relay and communicates with the Internet through AX/lwIP.
+* `native` — legacy fallback using the original native network path.
+
+---
+
+### Debugging
+
+```ini
+shim_trace=0
+```
+
+Levels:
+
+* `0` — normal mode
+* `1` — general socket tracing
+* `2` — verbose tracing
+
+For real games, `0` is recommended.
+
+High-frequency logging can change timing and interfere with NEX or other networking behavior.
+
+---
+
+## Socket compatibility
+
+The shim translates between Wii U `nsysnet` behavior and lwIP.
+
+Implemented areas include:
 
 ```text
-[249437556335] AX: start guard=2000ms gen=1 shim=on
-[249437558372] PHY: warm reopen
-[249437558624] AX: open 252ms
-[249437558654] AX: net 30ms
-[249437558656] AX: lease cached 192.168.2.190
-[249437558756] AX: shim ready hooks=24
-[249437558758] AX: ready 192.168.2.190
+socket
+socketclose
+socketclose_all
+
+bind
+connect
+listen
+accept
+shutdown
+
+send
+sendto
+sendto_multi
+sendto_multi_ex
+
+recv
+recvfrom
+recvfrom_ex
+recvfrom_multi
+
+select
+
+setsockopt
+getsockopt
+
+getsockname
+getpeername
+
+socketlasterr
 ```
 
-Detailed FunctionPatcher registration messages are only shown with `shim_trace=2`.
-
-The project also contains dedicated diagnostic applications and host-side regression tests for testing the driver, lwIP integration and socket shim independently.
-
----
-
-## Development tools
-
-The `tools/` directory contains utilities used during development and deployment.
-
-Notable examples include:
-
-* `send_module_via_ftp.sh` — upload the Aroma module over FTP.
-* `launch_udplogserver.sh` — start the UDP logging environment.
-* `shutdown_wiiu.sh` — remote console power helper.
-* `remote_poweroff/` — small RPX and wiiload helper for remotely powering off the Wii U.
-
-The `remote_poweroff` RPX calls `OSLaunchTitlev(OS_TITLE_ID_REBOOT, ...)`. Despite the API name, on the tested console this powers the Wii U off without powering it back on, so the tool is intentionally documented and named as a remote power-off helper.
-
----
-
-## Verified networking
-
-The AX88179 path has successfully been tested with:
+DNS support includes:
 
 ```text
-USB initialization
-        ↓
-Link detection
-        ↓
-Ethernet RX/TX
-        ↓
-lwIP
-        ↓
-DHCP
-        ↓
-IPv4 address
-        ↓
-ICMP
-        ↓
-TCP + UDP
+gethostbyname
+gethostbyaddr
+
+getaddrinfo
+getaddrinfo_rs
+getaddrinfo_async
+getaddrinfo_async_rs
+
+dns_abort_by_hname
+
+freeaddrinfo
+getnameinfo
+get_h_errno
+gai_strerror
 ```
 
-TCP and UDP echo tests have successfully passed with payload sizes including:
+Nintendo NSSL integration is handled through:
 
 ```text
-32 bytes
-504 bytes
-1024 bytes
-1400 bytes
+NSSLCreateConnection
 ```
-
-Traffic capture confirmed that the packets originated from the **AX88179 Ethernet interface** rather than the Wii U's native Wi-Fi interface.
 
 ---
 
-## nsysnet shim
+## Native descriptor compatibility
 
-The experimental shim intercepts selected exports from:
+The native Wii U title socket range observed on hardware is:
 
 ```text
-nsysnet.rpl
+4..31
 ```
 
-using Aroma's FunctionPatcher.
+That gives:
 
-Supported functionality currently includes parts of:
+```text
+28 simultaneous public sockets
+```
 
-* `socket`
-* `bind`
-* `connect`
-* `listen`
-* `accept`
-* `send`
-* `recv`
-* `sendto`
-* `recvfrom`
-* `select`
-* socket options
-* synchronous DNS resolution
+The AX shim preserves this behavior.
 
-The shim translates between the Wii U `nsysnet` ABI and lwIP.
+Each AX-backed socket reserves a native public descriptor and maps it to an internal lwIP descriptor.
 
-It also maintains mappings between public Wii U socket descriptors and lwIP sockets so native and Ethernet sockets can coexist.
+This allows:
 
-This part of the project is still experimental.
+```text
+native sockets + AX sockets
+```
+
+to coexist safely inside the same title.
 
 ---
 
-## NSSL / TLS limitation
+## TCP backpressure parity
 
-One of the largest remaining limitations is **NSSL**.
+Native Wii U TCP send capacity does not directly equal the visible `SO_SNDBUF` value.
 
-Wii U NSSL expects a native system socket descriptor handled by the original networking stack. A socket created by the AX88179 lwIP shim therefore cannot currently be transparently passed to NSSL.
+Measured behavior:
 
-As a consequence, applications relying on Nintendo's native TLS stack cannot yet transparently use the AX88179 interface.
+```text
+effective = ceil(SO_SNDBUF / 1360) * 1360
+```
 
-Solving this is required before the driver can behave like a completely transparent Wii U system Ethernet interface.
+| `SO_SNDBUF` | Native capacity | AX capacity |
+| ----------: | --------------: | ----------: |
+|           1 |            1360 |        1360 |
+|        4096 |            5440 |        5440 |
+|        8192 |            9520 |        9520 |
+|       16384 |           17680 |       17680 |
+|       65535 |           66640 |       66640 |
+
+AX now reproduces the native backpressure behavior exactly for these measured cases.
 
 ---
 
-## Project goal
+## UDP receive accounting
+
+Native Wii U `SO_RXDATA` counts:
+
+```text
+payload + 16 bytes per queued UDP datagram
+```
+
+Example:
+
+```text
+46 datagrams × 1400 payload bytes = 64400
+46 datagrams ×   16 metadata bytes = 736
+
+SO_RXDATA = 65136
+```
+
+AX reproduces this accounting.
+
+---
+
+## Multicast
+
+Validated:
+
+```text
+IP_MULTICAST_TTL
+IP_MULTICAST_LOOP
+IP_MULTICAST_IF
+IP_ADD_MEMBERSHIP
+IP_DROP_MEMBERSHIP
+```
+
+Both real multicast transmission and reception have been tested.
+
+---
+
+## DNS
+
+The AX resolver supports both synchronous and asynchronous Wii U DNS behavior.
+
+Native asynchronous behavior is polling-based:
+
+```text
+first call  -> EAI_INPROGRESS
+later calls -> EAI_INPROGRESS
+complete    -> 0 + addrinfo
+```
+
+AX reproduces this behavior using lwIP's asynchronous DNS system.
+
+Reverse IPv4 DNS is also implemented.
+
+Examples validated:
+
+```text
+8.8.8.8 -> dns.google
+1.1.1.1 -> one.one.one.one
+```
+
+---
+
+## Recovery
+
+### USB hot-unplug
+
+The AX88179 can be unplugged and reconnected while Aroma remains running.
+
+The driver automatically:
+
+```text
+detects UHS failure
+stops the old interface
+closes the old UHS handle
+waits for the adapter
+performs a cold PHY initialization
+recreates the RX ring
+restores networking
+```
+
+No console reboot is required.
+
+### Ethernet cable
+
+RJ45 link loss and restoration are handled without reopening the USB device.
+
+### DHCP
+
+DHCP has been validated after complete interface recreation.
+
+A real lease-expiration renew/rebind sequence remains to be tested.
+
+---
+
+## RX implementation
+
+The current receive path uses:
+
+```text
+RX_ASYNC_SLOTS = 3
+```
+
+Three asynchronous UHS bulk-IN requests remain in flight.
+
+When one completes:
+
+```text
+USB completion
+    |
+copy aggregate
+    |
+immediately rearm slot
+    |
+parse AX88179 aggregate
+    |
+submit frames to lwIP
+```
+
+Buffers are aligned to:
+
+```text
+0x40
+```
+
+At sustainable rates, the UDP receive-capacity test reaches:
+
+```text
+368 / 368 packets
+```
+
+At approximately `147 Mbit/s` payload rate, some packets are still lost.
+
+This is the main remaining low-level performance problem.
+
+---
+
+## Title lifecycle
+
+The AX worker is recreated across title transitions.
+
+Typical startup guards:
+
+```text
+first Aroma worker : ~25 s
+later workers      : ~2 s
+```
+
+Typical hardware timings:
+
+```text
+cold open : ~750 ms
+cold link : ~3.1 s
+
+warm open : ~250 ms
+warm link : ~13-15 ms
+```
+
+Warm reopen is used when the existing PHY state is still valid.
+
+Otherwise the driver falls back to a cold reset and autonegotiation.
+
+---
+
+## Real-game tests
+
+### Minecraft: Wii U Edition
+
+Validated through Pretendo:
+
+* AX/lwIP sockets
+* network connection
+* map creation
+* gameplay
+
+### Super Mario Maker
+
+Validated:
+
+* Course World
+* Pretendo
+* NSSL through AX88179
+* level download
+* gameplay
+
+### Super Smash Bros. for Wii U
+
+Validated:
+
+* online service access
+* NSSL through AX88179
+* matchmaking
+* real remote player
+* online gameplay
+* complete match
+
+---
+
+## Current limitations
+
+The project currently redirects only the GAME process.
+
+The following are not yet fully routed through AX88179:
+
+```text
+Wii U Menu
+Browser
+HOME Menu
+eShop
+Download Manager
+root process
+other system services
+```
+
+Higher-level Wii U network-state APIs also still report the original system networking state.
+
+The final system-wide implementation will need to expose the AX state as something equivalent to:
+
+```text
+link    = UP
+IPv4    = AX DHCP address
+gateway = AX DHCP gateway
+DNS     = AX DHCP DNS
+```
+
+---
+
+## Roadmap
+
+### 1. Finish RX performance
+
+Reach full packet retention during the approximately `147 Mbit/s` burst test.
+
+### 2. Validate DHCP renew/rebind
+
+Test a genuine lease lifecycle:
+
+```text
+BOUND
+  -> RENEWING
+  -> REBINDING
+```
+
+### 3. Expand process coverage
+
+Planned order:
+
+```text
+GAME
+  -> Wii U Menu
+  -> Browser
+  -> HOME Menu / eShop / Download Manager
+  -> root/system processes
+```
+
+### 4. Replace system network state
+
+Make the rest of the Wii U recognize the AX interface as its active network connection.
+
+### 5. Remove the Wi-Fi dependency
 
 The long-term goal is:
 
-> Plug an AX88179-based USB Ethernet adapter into a Wii U and use it as a normal network interface without applications needing to know that a custom driver is present.
-
-The project is **not there yet**.
-
-At the moment, the hardware driver and basic IPv4 networking are functional, while transparent integration with the complete Wii U networking environment remains under development.
+> Plug an AX88179 USB Ethernet adapter into a Wii U and use it as the console's normal network interface without applications needing to know that a custom driver is present.
 
 ---
 
 ## Development notes
 
-Detailed reverse-engineering results, experiments, known issues and previous approaches are documented in:
+Detailed reverse-engineering results and native-vs-AX measurements are maintained in:
 
-**[FINDINGS.md](FINDINGS.md)**
-
-This file is intentionally more verbose than the README and acts as the project's development journal.
+[FINDINGS.md](FINDINGS.md)
 
 ---
 
 ## Warning
 
-This software performs low-level interaction with Wii U USB services and applies an in-memory IOSU patch.
+This software performs low-level USB operations and applies a volatile in-memory IOSU patch.
 
-It is experimental software intended for development and reverse-engineering environments.
+It is experimental software intended for Wii U homebrew development and reverse engineering.
 
 Use it at your own risk.
 
@@ -421,6 +756,6 @@ Use it at your own risk.
 
 ## License
 
-No license has been specified yet.
+No project license has been selected yet.
 
-Before distributing binaries or accepting external contributions, a license should be selected for the original project code and the licensing requirements of vendored dependencies should be documented separately.
+The licensing requirements of the original project code and vendored dependencies should be documented before distributing official releases or accepting external contributions.
