@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.38-all-ends-done");
+WUMS_MODULE_VERSION("0.2.39-exit-file-trace");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -42,6 +42,41 @@ static int config_shim_trace = 0;
 static int config_system_dns = 0;
 static int config_force_native = 0;
 static int config_nssl_bridge = 0;
+
+static void exit_trace(const char *msg)
+{
+    FILE *f =
+        fopen("fs:/vol/external01/ax88179_exit.log", "a");
+
+    if (!f)
+        return;
+
+    fprintf(
+        f,
+        "[%llu] %s\n",
+        (unsigned long long)
+            OSTicksToMilliseconds(OSGetTime()),
+        msg);
+
+    fflush(f);
+    fclose(f);
+}
+
+static void exit_trace_int(
+    const char *prefix,
+    int value)
+{
+    char line[128];
+
+    snprintf(
+        line,
+        sizeof(line),
+        "%s%d",
+        prefix,
+        value);
+
+    exit_trace(line);
+}
 
 static void load_config(void)
 {
@@ -515,11 +550,16 @@ static int run_network(int argc, const char **argv)
             &title_ending,
             memory_order_acquire);
 
-    OSReport("[AXEXIT] worker cleanup begin ending=%d\n",
-             ending_title);
+    exit_trace_int(
+        "worker cleanup begin ending=",
+        ending_title);
 
 #if !AX_DISABLE_SHIM
+    exit_trace("before nsysnet_shim_stop_accepting");
+
     nsysnet_shim_stop_accepting();
+
+    exit_trace("after nsysnet_shim_stop_accepting");
 
     /*
      * During an ordinary runtime stop, close lwIP-owned sockets.
@@ -531,14 +571,15 @@ static int run_network(int argc, const char **argv)
         nsysnet_shim_drain_owned_sockets();
 #endif
 
-    OSReport("[AXEXIT] shim quiesced\n");
-
     if (ending_title) {
+        exit_trace("before ax_net_abandon_title");
+
         int tcpip_rc =
             ax_net_abandon_title();
 
-        OSReport("[AXEXIT] tcpip shutdown rc=%d\n",
-                 tcpip_rc);
+        exit_trace_int(
+            "after ax_net_abandon_title rc=",
+            tcpip_rc);
     } else {
         ax_net_stop();
     }
@@ -547,8 +588,11 @@ static int run_network(int argc, const char **argv)
 
     if (ax) {
         if (ending_title) {
-            OSReport("[AXEXIT] abandon UHS userspace handle\n");
+            exit_trace("before ax88179_abandon_title");
+
             ax88179_abandon_title(ax);
+
+            exit_trace("after ax88179_abandon_title");
         } else {
             ax88179_close(ax);
         }
@@ -558,9 +602,11 @@ static int run_network(int argc, const char **argv)
 
     ax_mark(AX_MARK_ADAPTER_CLOSED);
 
-    OSReport("[AXEXIT] worker cleanup complete\n");
+    exit_trace("worker cleanup complete");
 
 cleanup:
+    exit_trace("worker returning");
+
     AX_LOG("stopped");
     WHBLogUdpDeinit();
     return 0;
@@ -614,6 +660,8 @@ static void stop_after_all_application_ends(void)
     AX_LOG("ALL_APPLICATION_ENDS_DONE title=%016llx stopping",
            (unsigned long long)OSGetTitleID());
 
+    exit_trace("ALL_APPLICATION_ENDS_DONE entered");
+
     atomic_store_explicit(
         &title_ending,
         true,
@@ -623,6 +671,8 @@ static void stop_after_all_application_ends(void)
         &stopping,
         true,
         memory_order_release);
+
+    exit_trace("worker stop signalled");
 
     /*
      * Relay shutdown can consume up to roughly 500 ms and tcpip shutdown
@@ -637,9 +687,19 @@ static void stop_after_all_application_ends(void)
             OSMillisecondsToTicks(10));
     }
 
+    exit_trace_int(
+        "worker terminated after wait=",
+        OSIsThreadTerminated(&worker) ? 1 : 0);
+
     if (OSIsThreadTerminated(&worker)) {
+        exit_trace("before worker join");
+
         OSJoinThread(&worker, NULL);
+
+        exit_trace("after worker join");
     } else {
+        exit_trace("worker still alive after 2s");
+
         AX_LOG("ALL_APPLICATION_ENDS_DONE worker still alive");
     }
 
@@ -657,13 +717,24 @@ static void stop_after_all_application_ends(void)
                 OSMillisecondsToTicks(10));
         }
 
-        if (OSIsThreadTerminated(&watchdog))
+        exit_trace_int(
+            "watchdog terminated after wait=",
+            OSIsThreadTerminated(&watchdog) ? 1 : 0);
+
+        if (OSIsThreadTerminated(&watchdog)) {
+            exit_trace("before watchdog join");
+
             OSJoinThread(&watchdog, NULL);
+
+            exit_trace("after watchdog join");
+        }
 
         watchdog_started = 0;
     }
 
     started = 0;
+
+    exit_trace("ALL_APPLICATION_ENDS_DONE returning");
 }
 
 
