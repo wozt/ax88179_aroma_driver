@@ -5,6 +5,7 @@
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <coreinit/debug.h>
+#include <coreinit/title.h>
 #include <whb/log.h>
 #include <whb/log_udp.h>
 #include "../net/ax_net.h"
@@ -22,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.30-safe-boot");
+WUMS_MODULE_VERSION("0.2.31-lifecycle");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -55,13 +56,11 @@ static void load_config(void)
     for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
         f = fopen(paths[i], "r");
         if (f) {
-            AX_LOG("CONFIG: opened %s", paths[i]);
             break;
         }
     }
 
     if (!f) {
-        AX_LOG("CONFIG: fopen failed on all paths");
         return;
     }
 
@@ -98,12 +97,6 @@ static void load_config(void)
 
     fclose(f);
 
-    AX_LOG("CONFIG: DHCP mode = %s",
-           config_keep_first ? "keep_first" : "always");
-    AX_LOG("CONFIG: shim trace = %d", config_shim_trace);
-    AX_LOG("CONFIG: DNS = %s", config_system_dns ? "system" : "ax");
-    AX_LOG("CONFIG: route = %s", config_force_native ? "native" : "ax");
-    AX_LOG("CONFIG: NSSL = %s", config_nssl_bridge ? "bridge" : "native");
 }
 
 static const char *const mark_names[] = {
@@ -147,6 +140,24 @@ static int run_watchdog(int argc, const char **argv)
 static atomic_bool stopping;
 static int started;
 static atomic_uint worker_generation;
+static atomic_int menu_seen;
+
+/*
+ * Wii U Menu title IDs:
+ *   JPN 0005001010040000
+ *   USA 0005001010040100
+ *   EUR 0005001010040200
+ *
+ * EnvironmentLoader/Aroma runs before this. We deliberately do absolutely
+ * no AX/UHS/lwIP/shim/UDP-log work until one of these real Menu titles has
+ * actually started.
+ */
+static int is_wiiu_menu_title(uint64_t title_id)
+{
+    return title_id == 0x0005001010040000ULL ||
+           title_id == 0x0005001010040100ULL ||
+           title_id == 0x0005001010040200ULL;
+}
 
 /*
  * Recover from a physical AX88179 USB removal without restarting the
@@ -270,7 +281,12 @@ static int run_network(int argc, const char **argv)
         atomic_fetch_add_explicit(&worker_generation, 1,
                                   memory_order_relaxed);
 
-    const unsigned startup_delay_ms = (generation == 0) ? 25000 : 2000;
+    /*
+     * EnvironmentLoader/Aroma is now filtered before the worker even exists,
+     * so the old 25 second heuristic is no longer needed. This small delay
+     * only lets the real application settle before UHS/lwIP starts.
+     */
+    const unsigned startup_delay_ms = 2000;
 
     AX_LOG("start guard=%ums gen=%u %s",
            startup_delay_ms, generation,
@@ -382,6 +398,18 @@ static int run_network(int argc, const char **argv)
     if (nsysnet_shim_install() == 0) {
         ax_mark(AX_MARK_SHIM_INSTALLED);
         AX_LOG("shim ready hooks=%d", handle_count);
+
+        /*
+         * FTPiiU may already own a native/Wi-Fi :21 listener. Ask FTPiiU
+         * to discard/recreate it through its normal network-loss path.
+         * The replacement socket is then created through the active AX shim.
+         */
+        int ftp_handoff =
+            nsysnet_shim_request_ftp_handoff();
+
+        if (ftp_handoff > 0)
+            AX_LOG("FTP native listener handoff requested fd_count=%d",
+                   ftp_handoff);
     } else {
         AX_LOG("FAILED to install shim hooks");
     }
@@ -478,11 +506,25 @@ cleanup:
     return 0;
 }
 
+static void request_stop_worker(void)
+{
+    if (!started) return;
+
+    /*
+     * APPLICATION_REQUESTS_EXIT is called synchronously from Aroma's
+     * OSReceiveMessage hook. Never wait for USB/lwIP/NSSL from there.
+     *
+     * Only prevent new AX sockets and tell the CPU2 worker to stop.
+     */
+    nsysnet_shim_quiesce();
+    atomic_store_explicit(&stopping, true, memory_order_release);
+}
+
 static void stop_worker(void)
 {
     if (!started) return;
-    nsysnet_shim_stop_accepting();
-    atomic_store_explicit(&stopping, true, memory_order_release);
+
+    request_stop_worker();
     /* Bounded join: a worker stuck in an ioctl must not deadlock the
      * whole app transition (that hangs the boot splash). Give it 2 s,
      * then leave the thread to die with the process. */
@@ -500,15 +542,40 @@ WUMS_INITIALIZE(args)
 {
     (void)args;
 
-    AX_LOG("CONFIG: loading during WUMS initialization");
+    /*
+     * SD access only. In particular, do NOT initialise logging/networking
+     * here: EnvironmentLoader/Aroma is still bootstrapping at this point.
+     */
     load_config();
-
-    /* Device handles belong to a title; create them in APPLICATION_STARTS. */
 }
 
 WUMS_APPLICATION_STARTS()
 {
+    uint64_t title_id = OSGetTitleID();
+
+    /*
+     * The WUMS module is resident while EnvironmentLoader/Aroma itself is
+     * still executing. Before the first real Wii U Menu title appears:
+     *
+     *   - no worker
+     *   - no UDP logger
+     *   - no IOSU endpoint patch
+     *   - no UHS access
+     *   - no lwIP
+     *   - no FunctionPatcher nsysnet shim
+     *
+     * Waiting 2 seconds or 2 minutes on the Aroma selector therefore has
+     * absolutely no influence on the network driver anymore.
+     */
+    if (!atomic_load(&menu_seen)) {
+        if (!is_wiiu_menu_title(title_id))
+            return;
+
+        atomic_store(&menu_seen, 1);
+    }
+
     if (started) return;
+
     nsysnet_shim_begin_title();
     atomic_store_explicit(&stopping, false, memory_order_release);
     /* Core 2, not "any". Everything this module runs is background work,
@@ -534,7 +601,7 @@ WUMS_APPLICATION_STARTS()
     }
 }
 
-WUMS_APPLICATION_REQUESTS_EXIT() { stop_worker(); }
+WUMS_APPLICATION_REQUESTS_EXIT() { request_stop_worker(); }
 WUMS_APPLICATION_ENDS() { stop_worker(); }
 WUMS_DEINITIALIZE() { stop_worker(); }
 

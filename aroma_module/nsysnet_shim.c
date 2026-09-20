@@ -217,6 +217,13 @@ static atomic_int nssl_bridge_enabled;
 static atomic_uint ftp_native_bind_ip;
 static atomic_int ftp_ax_redirect_active;
 
+/*
+ * FTPiiU starts before AX becomes ready, so its first port-21 listener can
+ * legitimately be native/Wi-Fi. Once AX is ready we mark only that listener
+ * for a one-shot poll failure. FTPiiU then destroys/recreates it itself.
+ */
+static atomic_uint ftp_restart_mask;
+
 static void nssl_relay_stop_all(void);
 static void nssl_relay_detach_public_fd(int fd);
 
@@ -418,128 +425,6 @@ static int native_port(uint16_t net_port)
 {
     uint16_t port = nsn_ntohs(net_port);
     return port == AX_NATIVE_PORT_WIILOAD;
-}
-
-/*
- * FTPiiU starts very early from its WUPS application-start callback.
- *
- * At that point the AX worker can still be inside its startup guard, so
- * socket() legitimately falls back to nsysnet.  By the time FTPiiU later
- * creates PASV sockets, however, AX may be ready.  That used to produce a
- * split server:
- *
- *     control listener -> native/Wi-Fi
- *     PASV listener    -> lwIP/AX
- *
- * and subsequent directory transfers could stall.
- *
- * The :21 bind is the first point where we can positively identify the
- * early socket as FTP.  Keep its native descriptor as our public placeholder,
- * wait a bounded amount of time for AX, then attach a fresh lwIP TCP socket
- * to that same public descriptor.
- *
- * If AX never appears we leave the socket completely native, preserving the
- * old Wi-Fi behaviour.
- */
-#define FTP_EARLY_AX_WAIT_MS 35000
-
-static int ftp_adopt_early_native_listener(
-    int sockfd,
-    const struct nsn_sockaddr *addr,
-    socklen_t addrlen)
-{
-    if (!addr ||
-        addrlen < sizeof(struct nsn_sockaddr_in) ||
-        addr->sa_family != NSN_AF_INET ||
-        atomic_load(&force_native) ||
-        !shim_accepts())
-        return 0;
-
-    const struct nsn_sockaddr_in *in =
-        (const struct nsn_sockaddr_in *)addr;
-
-    if (nsn_ntohs(in->sin_port) != AX_FTP_PORT)
-        return 0;
-
-    SHIM_TRACE(
-        1,
-        "FTP early listener fd=%d waiting for AX",
-        sockfd);
-
-    OSTime deadline =
-        OSGetTime() +
-        OSMillisecondsToTicks(FTP_EARLY_AX_WAIT_MS);
-
-    while (shim_accepts() &&
-           !atomic_load(&force_native) &&
-           (!ax_net_stack_ready() || ax_net_ip4() == 0) &&
-           OSGetTime() < deadline) {
-        OSSleepTicks(OSMillisecondsToTicks(20));
-    }
-
-    if (!shim_accepts() ||
-        atomic_load(&force_native) ||
-        !ax_net_stack_ready() ||
-        ax_net_ip4() == 0) {
-        SHIM_TRACE(
-            1,
-            "FTP early listener fd=%d stays NATIVE",
-            sockfd);
-        return 0;
-    }
-
-    errno = 0;
-
-    int lwfd =
-        lwip_socket(AF_INET, SOCK_STREAM, 0);
-
-    if (lwfd < 0)
-        return 0;
-
-    /*
-     * FTPiiU sets SO_REUSEADDR before bind().  That call happened while the
-     * descriptor was still native, so reproduce the relevant state on the
-     * newly adopted lwIP socket.
-     */
-    int one = 1;
-    lwip_setsockopt(
-        lwfd,
-        SOL_SOCKET,
-        SO_REUSEADDR,
-        &one,
-        sizeof(one));
-
-    int native_sndbuf = 8192;
-    int native_rcvbuf = 8192;
-
-    lwip_setsockopt(
-        lwfd,
-        SOL_SOCKET,
-        SO_SNDBUF,
-        &native_sndbuf,
-        sizeof(native_sndbuf));
-
-    lwip_setsockopt(
-        lwfd,
-        SOL_SOCKET,
-        SO_RCVBUF,
-        &native_rcvbuf,
-        sizeof(native_rcvbuf));
-
-    /*
-     * sockfd itself remains open in nsysnet and becomes exactly the same
-     * kind of reserved public placeholder as sockets created normally by
-     * this shim.
-     */
-    track_fd(sockfd, lwfd);
-
-    SHIM_TRACE(
-        1,
-        "FTP adopted early native fd=%d -> lwfd=%d",
-        sockfd,
-        lwfd);
-
-    return 1;
 }
 
 /*
@@ -787,6 +672,9 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
 DECL_FUNCTION(int, socketclose, int sockfd)
 {
     if (is_foreign(sockfd)) {
+        if (sockfd >= 0 && sockfd < 32)
+            atomic_fetch_and(&ftp_restart_mask, ~(1u << sockfd));
+
         /*
          * It may be a public descriptor previously handed to NSSL.
          * Detach it before nsysnet can recycle the descriptor number.
@@ -814,6 +702,8 @@ DECL_FUNCTION(int, socketclose, int sockfd)
 
 DECL_FUNCTION(int, socketclose_all, void)
 {
+    atomic_store(&ftp_restart_mask, 0);
+
     if (!shim_accepts()) {
         SHIM_TRACE(1, "close_all -> NATIVE");
         errno = -1;
@@ -836,13 +726,8 @@ DECL_FUNCTION(int, socketclose_all, void)
 DECL_FUNCTION(int, bind, int sockfd, const struct nsn_sockaddr *addr, socklen_t addrlen)
 {
     if (is_foreign(sockfd)) {
-        if (!ftp_adopt_early_native_listener(
-                sockfd,
-                addr,
-                addrlen)) {
-            errno = -1;
-            return real_bind(sockfd, addr, addrlen);
-        }
+        errno = -1;
+        return real_bind(sockfd, addr, addrlen);
     }
 
     errno = 0;
@@ -1506,6 +1391,33 @@ DECL_FUNCTION(int, select, int nfds, struct nsn_fd_set *readfds, struct nsn_fd_s
                     (writefds ? writefds->fds_bits : 0) |
                     (exceptfds ? exceptfds->fds_bits : 0);
     want &= nfds == 32 ? UINT32_MAX : ((1u << nfds) - 1);
+
+    /*
+     * Safe FTP native -> AX handoff.
+     *
+     * Never close another thread's descriptor behind its back. Returning
+     * one EBADF from the listener poll makes FTPiiU run handleNetworkLost(),
+     * close its own listener, and recreate it on the next loop iteration.
+     */
+    uint32_t ftp_restart =
+        want & atomic_load(&ftp_restart_mask);
+
+    if (ftp_restart) {
+        atomic_fetch_and(&ftp_restart_mask, ~ftp_restart);
+
+        if (readfds)
+            readfds->fds_bits = 0;
+
+        if (writefds)
+            writefds->fds_bits = 0;
+
+        if (exceptfds)
+            exceptfds->fds_bits = 0;
+
+        errno = EBADF;
+        return -1;
+    }
+
     uint32_t nat = want & ~atomic_load(&open_mask);
 
     if (nat == want) {
@@ -2539,6 +2451,13 @@ out:
         (unsigned long long)r->ax_to_native,
         r->error);
 
+    /*
+     * The public socket belongs to Nintendo NSSL/the title.
+     *
+     * Our relay is now finished, therefore keeping this descriptor number
+     * is unsafe: nsysnet may recycle the number before title teardown.
+     */
+    atomic_store(&r->public_fd, -1);
     atomic_store(&r->done, 1);
     return 0;
 }
@@ -2616,30 +2535,12 @@ static void nssl_relay_stop_all(void)
 
         if (atomic_load(&r->allocated)) {
             /*
-             * Do not merely kill the private relay.  Nintendo NSSL may
-             * still be blocked on the public localhost endpoint while the
-             * title is trying to leave.  Shutting its transport down makes
-             * that pending I/O observe EOF/error and lets NSSL unwind.
+             * Only stop resources owned by the relay.
              *
-             * Leave the descriptor itself open: normal title/socket cleanup
-             * remains responsible for close(), avoiding descriptor reuse
-             * races during transition.
+             * The public socket was handed to Nintendo NSSL and must remain
+             * under Nintendo NSSL/the title's ownership. Closing our private
+             * localhost endpoint naturally makes its peer observe EOF.
              */
-            int public_fd =
-                atomic_load(&r->public_fd);
-
-            if (public_fd >= 0) {
-                SHIM_TRACE(
-                    1,
-                    "NSSL title-exit shutdown public fd=%d slot=%d",
-                    public_fd,
-                    i);
-
-                real_shutdown(
-                    public_fd,
-                    SHUT_RDWR);
-            }
-
             atomic_store(&r->stop, 1);
             any = 1;
         }
@@ -4312,6 +4213,103 @@ DECL_FUNCTION(const char *, gai_strerror, int ecode)
     }
 }
 
+/*
+ * Mark FTPiiU's pre-AX native port-21 listener for a one-shot poll failure.
+ *
+ * FTPiiU itself owns and closes the old fd. Its next loop iteration creates
+ * a new socket after AX/shim is ready, so bind(:21) goes through lwIP and
+ * ftp_rewrite_bind_to_ax().
+ */
+int nsysnet_shim_request_ftp_handoff(void)
+{
+    if (!shim_accepts() ||
+        !ax_net_stack_ready() ||
+        ax_net_ip4() == 0)
+        return 0;
+
+    int marked = 0;
+
+    for (int fd = 0; fd < 32; ++fd) {
+        uint32_t bit = 1u << fd;
+
+        if (!is_foreign(fd) ||
+            (atomic_load(&ftp_restart_mask) & bit))
+            continue;
+
+        struct nsn_sockaddr_in local;
+        socklen_t local_len = sizeof(local);
+
+        memset(&local, 0, sizeof(local));
+
+        errno = -1;
+
+        if (real_getsockname(
+                fd,
+                (struct nsn_sockaddr *)&local,
+                &local_len) != 0)
+            continue;
+
+        if (local.sin_family != NSN_AF_INET ||
+            nsn_ntohs(local.sin_port) != AX_FTP_PORT)
+            continue;
+
+        int type = 0;
+        socklen_t type_len = sizeof(type);
+
+        errno = -1;
+
+        if (real_getsockopt(
+                fd,
+                NSN_SOL_SOCKET,
+                NSN_SO_TYPE,
+                &type,
+                &type_len) != 0 ||
+            type != SOCK_STREAM)
+            continue;
+
+        /*
+         * Accepted FTP control connections also use local port 21.
+         * The listening socket has no peer; accepted control sockets do.
+         */
+        struct nsn_sockaddr_in peer;
+        socklen_t peer_len = sizeof(peer);
+
+        memset(&peer, 0, sizeof(peer));
+
+        errno = -1;
+
+        if (real_getpeername(
+                fd,
+                (struct nsn_sockaddr *)&peer,
+                &peer_len) == 0)
+            continue;
+
+        atomic_fetch_or(
+            &ftp_restart_mask,
+            bit);
+
+        WHBLogPrintf(
+            "AX: FTP handoff marked native listener fd=%d",
+            fd);
+
+        marked++;
+    }
+
+    return marked;
+}
+
+/*
+ * Called from WUMS_APPLICATION_REQUESTS_EXIT.
+ *
+ * That callback is synchronous inside Aroma's system-message handling.
+ * It therefore MUST remain essentially instantaneous.
+ */
+void nsysnet_shim_quiesce(void)
+{
+    atomic_store(&accepting_sockets, 0);
+    atomic_store(&probe_owns_accepting, 0);
+}
+
 /* ------------------------------------------------------------------ */
 /* registration                                                        */
 
@@ -4443,8 +4441,7 @@ fail:
 /* Registration persists, but fd/heap/thread ownership does not. Never
  * infer that a surviving patch makes per-title lwIP state valid. */
 void nsysnet_shim_stop_accepting(void) {
-    atomic_store(&accepting_sockets, 0);
-    atomic_store(&probe_owns_accepting, 0);
+    nsysnet_shim_quiesce();
     nssl_relay_stop_all();
 }
 void nsysnet_shim_begin_title(void) {
@@ -4457,6 +4454,7 @@ void nsysnet_shim_begin_title(void) {
 
     atomic_store(&ftp_native_bind_ip, 0);
     atomic_store(&ftp_ax_redirect_active, 0);
+    atomic_store(&ftp_restart_mask, 0);
 
     compat_state_reset_all();
     async_dns_reset_all();
