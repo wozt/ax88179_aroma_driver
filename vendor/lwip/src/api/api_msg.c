@@ -1674,7 +1674,17 @@ lwip_netconn_do_writemore(struct netconn *conn  WRITE_DELAYED_PARAM)
 {
   err_t err;
   const void *dataptr;
-  u16_t len, available;
+  /*
+   * tcp_write() still consumes one u16-sized chunk at a time, but the
+   * Wii U-compatible per-PCB send capacity can exceed 65535:
+   *
+   *   SO_SNDBUF=65535 -> effective snd_buf=66640
+   *
+   * Keep len at u16_t, but never truncate tcp_sndbuf() when deciding
+   * how much capacity remains for subsequent chunks.
+   */
+  u16_t len;
+  u32_t available;
   u8_t write_finished = 0;
   size_t diff;
   u8_t dontblock;
@@ -1732,8 +1742,9 @@ lwip_netconn_do_writemore(struct netconn *conn  WRITE_DELAYED_PARAM)
       LWIP_ASSERT("lwip_netconn_do_writemore: invalid length!",
                   ((conn->current_msg->msg.w.vector_off + len) <= conn->current_msg->msg.w.vector->len));
       /* we should loop around for more sending in the following cases:
-           1) We couldn't finish the current vector because of 16-bit size limitations.
-              tcp_write() and tcp_sndbuf() both are limited to 16-bit sizes
+           1) We couldn't finish the current vector because tcp_write() accepts
+              only one u16-sized chunk at a time. tcp_sndbuf() itself may now
+              exceed 65535 for Wii U SO_SNDBUF compatibility.
            2) We are sending the remainder of the current vector and have more */
       if ((len == 0xffff && diff > 0xffffUL) ||
           (len == (u16_t)diff && conn->current_msg->msg.w.vector_cnt > 1)) {
