@@ -23,27 +23,10 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.59-restore-title-cleanup");
+WUMS_MODULE_VERSION("0.2.60");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
-/* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
- * devices exposed by WUMS, including fs:/vol/external01.
- *
- * Expanded manually instead of WUMS_USE_WUT_DEVOPTAB() so we can trace
- * the beginning of the final devoptab teardown phase.
- */
-extern void __init_wut_devoptab(void);
-extern void __fini_wut_devoptab(void);
-
-void ax_init_wut_devoptab(void)
-{
-    __init_wut_devoptab();
-}
-
-WUMS_HOOK_EX(
-    WUMS_HOOK_INIT_WUT_DEVOPTAB,
-    ax_init_wut_devoptab);
-
+WUMS_USE_WUT_DEVOPTAB();
 
 static OSThread worker __attribute__((aligned(0x40)));
 static uint8_t stack[64 * 1024] __attribute__((aligned(0x40)));
@@ -57,75 +40,6 @@ static int config_system_dns = 0;
 static int config_force_native = 0;
 static int config_nssl_bridge = 0;
 static int config_ftp_handoff = 1;
-
-static void exit_trace(const char *msg)
-{
-    FILE *f =
-        fopen("fs:/vol/external01/ax88179_exit.log", "a");
-
-    if (!f)
-        return;
-
-    fprintf(
-        f,
-        "[%llu] title=%016llx %s\n",
-        (unsigned long long)
-            OSTicksToMilliseconds(OSGetTime()),
-        (unsigned long long)
-            OSGetTitleID(),
-        msg);
-
-    fflush(f);
-    fclose(f);
-}
-
-static void exit_trace_int(
-    const char *prefix,
-    int value)
-{
-    char line[128];
-
-    snprintf(
-        line,
-        sizeof(line),
-        "%s%d",
-        prefix,
-        value);
-
-    exit_trace(line);
-}
-
-/*
- * Diagnostic phase marker.
- *
- * Reaching this proves that Aroma has finished dispatching
- * ALL_APPLICATION_ENDS_DONE to every loaded module.
- */
-void ax_trace_fini_wut_sockets(void)
-{
-    exit_trace("FINI_WUT_SOCKETS phase reached");
-}
-
-WUMS_HOOK_EX(
-    WUMS_HOOK_FINI_WUT_SOCKETS,
-    ax_trace_fini_wut_sockets);
-
-/*
- * Reaching this proves that Aroma has finished dispatching the complete
- * FINI_WUT_SOCKETS phase and has moved on to FINI_WUT_DEVOPTAB.
- *
- * We can safely write the BEGIN marker because fs: still exists here.
- * Do not attempt a file trace after __fini_wut_devoptab(), because this
- * very call removes the devoptab used by fopen().
- */
-void ax_fini_wut_devoptab(void)
-{
-    __fini_wut_devoptab();
-}
-
-WUMS_HOOK_EX(
-    WUMS_HOOK_FINI_WUT_DEVOPTAB,
-    ax_fini_wut_devoptab);
 
 static void load_config(void)
 {
@@ -613,107 +527,45 @@ static int run_network(int argc, const char **argv)
             &title_ending,
             memory_order_acquire);
 
-    exit_trace_int(
-        "worker cleanup begin ending=",
-        ending_title);
-
 #if !AX_DISABLE_SHIM
-    exit_trace("before nsysnet_shim_stop_accepting");
-
     nsysnet_shim_stop_accepting();
-
-    exit_trace("after nsysnet_shim_stop_accepting");
 
     /*
      * During an ordinary runtime stop, close lwIP-owned sockets.
-     *
-     * During APPLICATION_ENDS the title has already performed its socket
-     * and NSSL cleanup, so do not touch those PCBs again.
+     * During a title transition they have already been retired by the
+     * title/NSSL path, so abandon the per-title state instead.
      */
     if (!ending_title)
         nsysnet_shim_drain_owned_sockets();
 #endif
 
-    if (ending_title) {
-        exit_trace("before ax_net_abandon_title");
-
-        int tcpip_rc =
-            ax_net_abandon_title();
-
-        exit_trace_int(
-            "after ax_net_abandon_title rc=",
-            tcpip_rc);
-    } else {
+    if (ending_title)
+        ax_net_abandon_title();
+    else
         ax_net_stop();
-    }
 
     ax_mark(AX_MARK_NET_STOP);
 
     if (ax) {
-        if (ending_title) {
-            exit_trace("before ax88179_abandon_title");
-
+        if (ending_title)
             ax88179_abandon_title(ax);
-
-            exit_trace("after ax88179_abandon_title");
-        } else {
+        else
             ax88179_close(ax);
-        }
 
         ax = NULL;
     }
 
     ax_mark(AX_MARK_ADAPTER_CLOSED);
 
-    exit_trace("worker cleanup complete");
-
 cleanup:
-    exit_trace("worker returning");
-
     AX_LOG("stopped");
     WHBLogUdpDeinit();
     return 0;
 }
 
-static void note_exit_requested(void)
-{
-    if (!started) return;
-
-    /*
-     * REQUESTS_EXIT means the title has only been asked to leave.
-     * Keep AX/lwIP/NSSL fully alive until __PPCExit/APPLICATION_ENDS.
-     */
-    AX_LOG("REQUESTS_EXIT title=%016llx keep-network-alive",
-           (unsigned long long)OSGetTitleID());
-}
-
 /*
- * Our own APPLICATION_ENDS is too early for destructive cleanup:
- * Aroma still has to call APPLICATION_ENDS for every module after us.
- *
- * Keep AX/lwIP/NSSL alive until ALL_APPLICATION_ENDS_DONE.
- */
-static void note_application_ends(void)
-{
-    if (!started)
-        return;
-
-    AX_LOG("APPLICATION_ENDS title=%016llx defer-cleanup",
-           (unsigned long long)OSGetTitleID());
-}
-
-/*
- * Aroma __PPCExit order:
- *
- *   APPLICATION_ENDS (all modules)
- *   ALL_APPLICATION_ENDS_DONE
- *   FINI_WUT_SOCKETS
- *   FINI_WUT_DEVOPTAB
- *   real___PPCExit
- *
- * Therefore this is the correct point to stop our per-title resources:
- * every other module has already run its APPLICATION_ENDS, while WUT
- * sockets and devoptab still exist.
+ * Stop per-title resources after every module has received
+ * APPLICATION_ENDS, while WUT sockets/devoptab are still available.
  */
 static void stop_after_all_application_ends(void)
 {
@@ -722,8 +574,6 @@ static void stop_after_all_application_ends(void)
 
     AX_LOG("ALL_APPLICATION_ENDS_DONE title=%016llx stopping",
            (unsigned long long)OSGetTitleID());
-
-    exit_trace("ALL_APPLICATION_ENDS_DONE entered");
 
     atomic_store_explicit(
         &title_ending,
@@ -735,11 +585,9 @@ static void stop_after_all_application_ends(void)
         true,
         memory_order_release);
 
-    exit_trace("worker stop signalled");
-
     /*
-     * Relay shutdown can consume up to roughly 500 ms and tcpip shutdown
-     * another ~100 ms. Give the worker a comfortable ceiling here.
+     * Relay shutdown can take a few hundred milliseconds.
+     * Give the worker up to two seconds to terminate cleanly.
      */
     for (int i = 0;
          i < 200 &&
@@ -750,19 +598,9 @@ static void stop_after_all_application_ends(void)
             OSMillisecondsToTicks(10));
     }
 
-    exit_trace_int(
-        "worker terminated after wait=",
-        OSIsThreadTerminated(&worker) ? 1 : 0);
-
     if (OSIsThreadTerminated(&worker)) {
-        exit_trace("before worker join");
-
         OSJoinThread(&worker, NULL);
-
-        exit_trace("after worker join");
     } else {
-        exit_trace("worker still alive after 2s");
-
         AX_LOG("ALL_APPLICATION_ENDS_DONE worker still alive");
     }
 
@@ -776,26 +614,14 @@ static void stop_after_all_application_ends(void)
                 OSMillisecondsToTicks(10));
         }
 
-        exit_trace_int(
-            "watchdog terminated after wait=",
-            OSIsThreadTerminated(&watchdog) ? 1 : 0);
-
-        if (OSIsThreadTerminated(&watchdog)) {
-            exit_trace("before watchdog join");
-
+        if (OSIsThreadTerminated(&watchdog))
             OSJoinThread(&watchdog, NULL);
-
-            exit_trace("after watchdog join");
-        }
 
         watchdog_started = 0;
     }
 
     started = 0;
-
-    exit_trace("ALL_APPLICATION_ENDS_DONE returning");
 }
-
 
 
 /*
@@ -900,8 +726,6 @@ WUMS_APPLICATION_STARTS()
     }
 }
 
-WUMS_APPLICATION_REQUESTS_EXIT() { note_exit_requested(); }
-WUMS_APPLICATION_ENDS() { note_application_ends(); }
 WUMS_ALL_APPLICATION_ENDS_DONE() { stop_after_all_application_ends(); }
 WUMS_DEINITIALIZE() { stop_worker(); }
 

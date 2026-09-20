@@ -41,8 +41,6 @@
 
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
-#include <coreinit/title.h>
-#include <nn/result.h>
 #include <function_patcher/function_patching.h>
 #include <whb/log.h>
 
@@ -612,84 +610,6 @@ static int compat_get_int(void *optval, socklen_t *optlen, int value)
     *(int *)optval = value;
     *optlen = sizeof(int);
     return 0;
-}
-
-/*
- * Persistent exit trace.
- *
- * This hook runs before WUMS_HOOK_FINI_WUT_DEVOPTAB, so the SD devoptab
- * should still be alive even if nsysnet itself is currently shutting down.
- */
-static void shim_exit_trace(const char *msg)
-{
-    FILE *f =
-        fopen("fs:/vol/external01/ax88179_exit.log", "a");
-
-    if (!f)
-        return;
-
-    fprintf(
-        f,
-        "[%llu] title=%016llx %s\n",
-        (unsigned long long)
-            OSTicksToMilliseconds(OSGetTime()),
-        (unsigned long long)
-            OSGetTitleID(),
-        msg);
-
-    fflush(f);
-    fclose(f);
-}
-
-/*
- * Diagnostic hook only.
- *
- * WUT's __fini_wut_socket() does:
- *
- *   ACClose()
- *   ACFinalize()
- *   __wut_socket_fini_devoptab()
- *   socket_lib_finish()
- *
- * If "begin" appears but "end" does not, socket_lib_finish itself hangs.
- * If neither appears, the hang is earlier in __fini_wut_socket().
- */
-DECL_FUNCTION(void, socket_lib_finish, void)
-{
-    shim_exit_trace("socket_lib_finish begin");
-
-    real_socket_lib_finish();
-
-    shim_exit_trace("socket_lib_finish end");
-}
-
-DECL_FUNCTION(NNResult, ACClose, void)
-{
-    shim_exit_trace("ACClose begin");
-
-    NNResult result =
-        real_ACClose();
-
-    char line[96];
-
-    snprintf(
-        line,
-        sizeof(line),
-        "ACClose end result=%d",
-        result.value);
-
-    shim_exit_trace(line);
-
-    return result;
-}
-
-DECL_FUNCTION(void, ACFinalize, void)
-{
-    shim_exit_trace("ACFinalize begin");
-
-    real_ACFinalize();
-
-    shim_exit_trace("ACFinalize end");
 }
 
 /* ------------------------------------------------------------------ */
