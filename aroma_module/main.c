@@ -23,12 +23,26 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.43-defer-all-ends-cleanup");
+WUMS_MODULE_VERSION("0.2.44-trace-wums-fini-phases");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
- * devices exposed by WUMS, including fs:/vol/external01. */
-WUMS_USE_WUT_DEVOPTAB();
+ * devices exposed by WUMS, including fs:/vol/external01.
+ *
+ * Expanded manually instead of WUMS_USE_WUT_DEVOPTAB() so we can trace
+ * the beginning of the final devoptab teardown phase.
+ */
+extern void __init_wut_devoptab(void);
+extern void __fini_wut_devoptab(void);
+
+void ax_init_wut_devoptab(void)
+{
+    __init_wut_devoptab();
+}
+
+WUMS_HOOK_EX(
+    WUMS_HOOK_INIT_WUT_DEVOPTAB,
+    ax_init_wut_devoptab);
 
 
 static OSThread worker __attribute__((aligned(0x40)));
@@ -80,6 +94,42 @@ static void exit_trace_int(
 
     exit_trace(line);
 }
+
+/*
+ * Diagnostic phase marker.
+ *
+ * Reaching this proves that Aroma has finished dispatching
+ * ALL_APPLICATION_ENDS_DONE to every loaded module.
+ */
+void ax_trace_fini_wut_sockets(void)
+{
+    exit_trace("FINI_WUT_SOCKETS phase reached");
+}
+
+WUMS_HOOK_EX(
+    WUMS_HOOK_FINI_WUT_SOCKETS,
+    ax_trace_fini_wut_sockets);
+
+/*
+ * Reaching this proves that Aroma has finished dispatching the complete
+ * FINI_WUT_SOCKETS phase and has moved on to FINI_WUT_DEVOPTAB.
+ *
+ * We can safely write the BEGIN marker because fs: still exists here.
+ * Do not attempt a file trace after __fini_wut_devoptab(), because this
+ * very call removes the devoptab used by fopen().
+ */
+void ax_fini_wut_devoptab(void)
+{
+    exit_trace("FINI_WUT_DEVOPTAB begin");
+
+    __fini_wut_devoptab();
+
+    OSReport("[AXEXIT] FINI_WUT_DEVOPTAB returned\n");
+}
+
+WUMS_HOOK_EX(
+    WUMS_HOOK_FINI_WUT_DEVOPTAB,
+    ax_fini_wut_devoptab);
 
 static void load_config(void)
 {
