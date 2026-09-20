@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.34-graceful-title-exit");
+WUMS_MODULE_VERSION("0.2.35-nonblocking-title-end");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -525,25 +525,68 @@ static void note_exit_requested(void)
            (unsigned long long)OSGetTitleID());
 }
 
-static void stop_worker(void)
+/*
+ * APPLICATION_ENDS runs from Aroma's __PPCExit hook.
+ *
+ * At this point the title has completed its own NSSL/socket cleanup and the
+ * process is about to disappear. Waiting for, or joining, one of that
+ * process' threads from __PPCExit can deadlock the title transition.
+ *
+ * Signal our CPU2 worker and immediately return. If it gets CPU time before
+ * process destruction it can perform its normal cleanup; otherwise the
+ * process teardown kills it. The next title calls ax_net_forget() before
+ * starting a fresh lwIP instance anyway.
+ */
+static void end_title_nonblocking(void)
 {
-    if (!started) return;
+    if (!started)
+        return;
 
-    AX_LOG("APPLICATION_ENDS title=%016llx stopping-network",
+    AX_LOG("APPLICATION_ENDS title=%016llx signal-only",
            (unsigned long long)OSGetTitleID());
 
     nsysnet_shim_quiesce();
-    atomic_store_explicit(&stopping, true, memory_order_release);
-    /* Bounded join: a worker stuck in an ioctl must not deadlock the
-     * whole app transition (that hangs the boot splash). Give it 2 s,
-     * then leave the thread to die with the process. */
-    for (int i = 0; i < 200 && !OSIsThreadTerminated(&worker); i++)
-        OSSleepTicks(OSMillisecondsToTicks(10));
-    if (!OSIsThreadTerminated(&worker)) {
-        AX_LOG("worker stuck, leaving it to the process teardown");
-    } else {
-        OSJoinThread(&worker, NULL);
+    atomic_store_explicit(
+        &stopping,
+        true,
+        memory_order_release);
+
+    /*
+     * Resident module state survives the application switch, but this
+     * OSThread belongs to the outgoing process. Do not attempt to join it
+     * from the next application.
+     */
+    started = 0;
+}
+
+
+/*
+ * Full stop is retained only for actual module deinitialisation, where we
+ * are not sitting inside a title's __PPCExit transition.
+ */
+static void stop_worker(void)
+{
+    if (!started)
+        return;
+
+    nsysnet_shim_quiesce();
+
+    atomic_store_explicit(
+        &stopping,
+        true,
+        memory_order_release);
+
+    for (int i = 0;
+         i < 200 &&
+         !OSIsThreadTerminated(&worker);
+         ++i) {
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
     }
+
+    if (OSIsThreadTerminated(&worker))
+        OSJoinThread(&worker, NULL);
+
     started = 0;
 }
 
@@ -611,7 +654,7 @@ WUMS_APPLICATION_STARTS()
 }
 
 WUMS_APPLICATION_REQUESTS_EXIT() { note_exit_requested(); }
-WUMS_APPLICATION_ENDS() { stop_worker(); }
+WUMS_APPLICATION_ENDS() { end_title_nonblocking(); }
 WUMS_DEINITIALIZE() { stop_worker(); }
 
 /* Runtime entry points used by shim_probe through OSDynLoad. */
