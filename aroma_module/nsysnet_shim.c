@@ -4753,6 +4753,11 @@ int nsysnet_shim_install(void)
      * Keep only the normal nsysnet socket hook group for this test.
      */
 
+    /*
+     * 0.2.47 socket hook bisection - group A.
+     *
+     * 11 functions x GAME + Wii U Menu = 22 handles.
+     */
     SHIM_PATCH(socket);
     SHIM_PATCH(socketclose);
     SHIM_PATCH(socketclose_all);
@@ -4764,17 +4769,6 @@ int nsysnet_shim_install(void)
     SHIM_PATCH(send);
     SHIM_PATCH(sendto);
     SHIM_PATCH(sendto_multi);
-    SHIM_PATCH(sendto_multi_ex);
-    SHIM_PATCH(recv);
-    SHIM_PATCH(recvfrom);
-    SHIM_PATCH(recvfrom_ex);
-    SHIM_PATCH(recvfrom_multi);
-    SHIM_PATCH(select);
-    SHIM_PATCH(setsockopt);
-    SHIM_PATCH(getsockopt);
-    SHIM_PATCH(getsockname);
-    SHIM_PATCH(getpeername);
-    SHIM_PATCH(socketlasterr);
 
     /*
      * 0.2.46 diagnostic:
