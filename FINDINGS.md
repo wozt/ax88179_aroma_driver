@@ -26,7 +26,7 @@
 [✓] recvfrom_multi
 [✓] recvfrom_ex avec vrai TTL
 [✓] sendto_multi
-[ ] parité UDP SO_RXDATA (natif = payload + 16 octets/datagramme)
+[✓] parité UDP SO_RXDATA (payload + 16 octets/datagramme)
 [✓] gethostbyaddr
 [✓] DNS async / variantes
 [✓] NSSL Nintendo : bridge natif -> relay lwIP/AX validé
@@ -428,15 +428,38 @@ Relation observée :
 
     46 * 1416 = 65136
 
-Le `SO_RXDATA` UDP natif compte donc apparemment :
+Le `SO_RXDATA` UDP natif compte :
 
     payload + 16 octets par datagramme
 
-AX compte actuellement seulement le payload :
+La même comptabilité est maintenant reproduite par AX/lwIP.
 
-    46 * 1400 = 64400
+Validation réelle avec `SO_RCVBUF=65535`, datagrammes de 1400 octets :
 
-Cette différence de comptabilité reste ouverte.
+    46 datagrammes
+    payload       = 46 * 1400 = 64400
+    métadonnées   = 46 * 16   =   736
+    SO_RXDATA     =             65136
+
+Résultat AX validé :
+
+    RXDATA=65136 packets=46 bytes=64400
+
+Les rounds à cadence soutenable ont reproduit la capacité native complète
+sur les huit sockets :
+
+    8 * 46 = 368 datagrammes
+    515200 octets payload
+
+Après drain :
+
+    sockets=8/8
+    packets=24/24
+
+Le round haute cadence reste un problème séparé de performance RX :
+la comptabilité SO_RXDATA est correcte pour tous les datagrammes reçus,
+mais tous les datagrammes du burst ne parviennent pas encore jusqu'aux
+files UDP à la cadence maximale.
 
 ### Alignement recvfrom natif
 
@@ -652,7 +675,6 @@ Avec `dns=system`, les hooks DNS restent volontairement désactivés.
 
 ### Compatibilité ABI
 
-- UDP SO_RXDATA : ajouter les 16 octets/datagramme visibles ;
 - état/options NSSL lors de la promotion.
 
 ### Robustesse réseau
