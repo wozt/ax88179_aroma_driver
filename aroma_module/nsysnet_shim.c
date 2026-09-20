@@ -355,7 +355,16 @@ static void track_fd(int fd, int lwfd) {
 }
 static void untrack_fd(int fd) { atomic_fetch_and(&open_mask, ~(1u << fd)); }
 static int is_foreign(int fd) {
-    return !(fd >= 0 && fd < 32 && (atomic_load(&open_mask) & (1u << fd)));
+    /*
+     * REQUESTS_EXIT first flips accepting_sockets to zero. From that exact
+     * point every title-visible socket must fall back to its native nsysnet
+     * placeholder, even while the CPU2 worker is still retiring lwIP.
+     */
+    if (!shim_accepts())
+        return 1;
+
+    return !(fd >= 0 && fd < 32 &&
+             (atomic_load(&open_mask) & (1u << fd)));
 }
 /* errno is per-thread in newlib. -1 marks a native call, whose error is
  * retrieved from nsysnet. lwIP calls use ordinary positive errno values. */
@@ -4306,8 +4315,43 @@ int nsysnet_shim_request_ftp_handoff(void)
  */
 void nsysnet_shim_quiesce(void)
 {
+    /*
+     * Called synchronously from Aroma's OSReceiveMessage hook.
+     *
+     * Absolutely no socket I/O, lwIP calls, waits or core locks here.
+     * is_foreign() observes accepting_sockets immediately, so all later
+     * title socket calls go to the native placeholder descriptors.
+     */
     atomic_store(&accepting_sockets, 0);
     atomic_store(&probe_owns_accepting, 0);
+}
+
+void nsysnet_shim_drain_owned_sockets(void)
+{
+    /*
+     * CPU2 worker side of title teardown.
+     *
+     * Public nsysnet descriptors are NOT closed here: the title owns them
+     * and will close them normally. We only retire the private lwIP backing
+     * descriptors before ax_net_stop() removes the netif.
+     */
+    uint32_t mask =
+        atomic_exchange(&open_mask, 0);
+
+    for (int fd = 0; fd < 32; ++fd) {
+        if (!(mask & (1u << fd)))
+            continue;
+
+        int lwfd =
+            atomic_exchange(&mapped_fd[fd], -1);
+
+        if (lwfd >= 0) {
+            lwip_shutdown(lwfd, SHUT_RDWR);
+            lwip_close(lwfd);
+        }
+
+        compat_state_reset(fd);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -4446,6 +4490,17 @@ void nsysnet_shim_stop_accepting(void) {
 }
 void nsysnet_shim_begin_title(void) {
     nsysnet_shim_stop_accepting();
+
+    /*
+     * A previous process' lwIP descriptor numbers are meaningless here.
+     * The old process should have drained them on its worker; if it did not,
+     * forget the stale mappings rather than touching dead lwIP state.
+     */
+    atomic_store(&open_mask, 0);
+
+    for (int fd = 0; fd < 32; ++fd)
+        atomic_store(&mapped_fd[fd], -1);
+
     atomic_store(&probe_thread, 0);
     atomic_store(&probe_baseline_open_mask, 0);
     atomic_store(&probe_baseline_ai_mask, 0);

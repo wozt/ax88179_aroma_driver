@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.31-lifecycle");
+WUMS_MODULE_VERSION("0.2.32-exit-drain");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -489,6 +489,13 @@ static int run_network(int argc, const char **argv)
     /* Cleanup */
 #if !AX_DISABLE_SHIM
     nsysnet_shim_stop_accepting();
+
+    /*
+     * From REQUESTS_EXIT onward the title only sees its native placeholder
+     * descriptors. Close the old lwIP backing sockets here, on our CPU2
+     * worker, before dismantling the netif.
+     */
+    nsysnet_shim_drain_owned_sockets();
 #endif
     ax_net_stop();
     ax_mark(AX_MARK_NET_STOP);
@@ -514,8 +521,12 @@ static void request_stop_worker(void)
      * APPLICATION_REQUESTS_EXIT is called synchronously from Aroma's
      * OSReceiveMessage hook. Never wait for USB/lwIP/NSSL from there.
      *
-     * Only prevent new AX sockets and tell the CPU2 worker to stop.
+     * Log before quiescing: the UDP logger itself is AX-backed and becomes
+     * intentionally unusable as soon as the title is detached from lwIP.
      */
+    AX_LOG("REQUESTS_EXIT title=%016llx",
+           (unsigned long long)OSGetTitleID());
+
     nsysnet_shim_quiesce();
     atomic_store_explicit(&stopping, true, memory_order_release);
 }

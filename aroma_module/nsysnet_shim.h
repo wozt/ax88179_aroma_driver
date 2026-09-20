@@ -13,6 +13,7 @@ int nsysnet_shim_install(void);
 int nsysnet_shim_request_ftp_handoff(void);
 void nsysnet_shim_begin_title(void);
 void nsysnet_shim_quiesce(void);
+void nsysnet_shim_drain_owned_sockets(void);
 void nsysnet_shim_stop_accepting(void);
 int nsysnet_shim_begin_probe(void);
 int nsysnet_shim_end_probe(void);
