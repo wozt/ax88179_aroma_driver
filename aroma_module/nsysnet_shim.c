@@ -150,7 +150,7 @@ struct nsn_sendto_multi_ex_buffers {
 #define NSN_IP_DROP_MEMBERSHIP 13
 #define NSN_IP_UNKNOWN         14
 
-#define AX_NATIVE_PORT_FTP     21
+#define AX_FTP_PORT            21
 #define AX_NATIVE_PORT_WIILOAD 4299
 
 /* wut netdb values */
@@ -207,6 +207,15 @@ static atomic_int system_dns;
 static atomic_int force_native;
 static atomic_int ax_activity_pending;
 static atomic_int nssl_bridge_enabled;
+
+/*
+ * FTPiiU obtains the console address from nn::ac, which currently reports
+ * the native/Wi-Fi address. When its control listener is routed through
+ * AX, remember that address so its subsequent PASV bind(address, 0) can
+ * be translated to the AX address as well.
+ */
+static atomic_uint ftp_native_bind_ip;
+static atomic_int ftp_ax_redirect_active;
 
 static void nssl_relay_stop_all(void);
 
@@ -407,7 +416,96 @@ static int set_nonblocking(int s, int on)
 static int native_port(uint16_t net_port)
 {
     uint16_t port = nsn_ntohs(net_port);
-    return port == AX_NATIVE_PORT_FTP || port == AX_NATIVE_PORT_WIILOAD;
+    return port == AX_NATIVE_PORT_WIILOAD;
+}
+
+/*
+ * FTPiiU currently learns its local IPv4 address from nn::ac.
+ *
+ * While Wi-Fi is still enabled that gives the native address, e.g.
+ * 192.168.2.124, even though the socket itself is owned by lwIP/AX at
+ * 192.168.2.190.
+ *
+ * Translate:
+ *
+ *   FTP control:
+ *       192.168.2.124:21 -> 192.168.2.190:21
+ *
+ * and later:
+ *
+ *   FTP PASV:
+ *       192.168.2.124:0  -> 192.168.2.190:0
+ *
+ * Port zero is important: FTPiiU asks the stack for an ephemeral passive
+ * port and then advertises the address returned by getsockname().
+ */
+static int ftp_rewrite_bind_to_ax(
+    int sockfd,
+    struct sockaddr_in *addr)
+{
+    if (!addr ||
+        addr->sin_family != AF_INET)
+        return 0;
+
+    int type = 0;
+    socklen_t type_len = sizeof(type);
+
+    if (lwip_getsockopt(
+            stack_fd(sockfd),
+            SOL_SOCKET,
+            SO_TYPE,
+            &type,
+            &type_len) != 0 ||
+        type != SOCK_STREAM)
+        return 0;
+
+    uint32_t ax_ip = ax_net_ip4();
+
+    if (ax_ip == 0)
+        return 0;
+
+    uint16_t port =
+        nsn_ntohs(addr->sin_port);
+
+    /*
+     * First identify the FTP control listener.
+     */
+    if (port == AX_FTP_PORT) {
+        atomic_store(
+            &ftp_native_bind_ip,
+            addr->sin_addr.s_addr);
+
+        atomic_store(
+            &ftp_ax_redirect_active,
+            1);
+
+        if (addr->sin_addr.s_addr != ax_ip) {
+            addr->sin_addr.s_addr = ax_ip;
+            return 1;
+        }
+
+        return 0;
+    }
+
+    /*
+     * FTPiiU creates its PASV listener from the command socket's stored
+     * local address, then binds it with port 0.
+     */
+    if (port == 0 &&
+        atomic_load(&ftp_ax_redirect_active)) {
+
+        uint32_t native_ip =
+            atomic_load(&ftp_native_bind_ip);
+
+        if (addr->sin_addr.s_addr == native_ip &&
+            addr->sin_addr.s_addr != ax_ip) {
+
+            addr->sin_addr.s_addr = ax_ip;
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 /*
@@ -613,6 +711,7 @@ DECL_FUNCTION(int, bind, int sockfd, const struct nsn_sockaddr *addr, socklen_t 
     struct sockaddr_in l;
     if (!sockaddr_to_lwip(&l, addr, addrlen)) { errno = EAFNOSUPPORT; return -1; }
     uint16_t port = nsn_ntohs(l.sin_port);
+
     if (native_port(l.sin_port)) {
         SHIM_TRACE(1, "bind(fd=%d,port=%u) -> NATIVE reserved", sockfd, port);
         lwip_close(stack_fd(sockfd));
@@ -620,9 +719,28 @@ DECL_FUNCTION(int, bind, int sockfd, const struct nsn_sockaddr *addr, socklen_t 
         errno = -1;
         return real_bind(sockfd, addr, addrlen);
     }
+
+    int ftp_rewritten =
+        ftp_rewrite_bind_to_ax(
+            sockfd,
+            &l);
+
+    if (ftp_rewritten) {
+        SHIM_TRACE(
+            1,
+            "FTP bind fd=%d port=%u -> AX ip=%08x",
+            sockfd,
+            port,
+            (unsigned)l.sin_addr.s_addr);
+    }
+
     SHIM_TRACE(1, "bind(fd=%d/lwfd=%d,port=%u) -> AX",
                sockfd, stack_fd(sockfd), port);
-    int r = lwip_bind(stack_fd(sockfd), (struct sockaddr *)&l, sizeof(l));
+
+    int r = lwip_bind(
+        stack_fd(sockfd),
+        (struct sockaddr *)&l,
+        sizeof(l));
     SHIM_TRACE(1, "bind fd=%d rc=%d errno=%d", sockfd, r, errno);
     return r;
 }
@@ -4135,6 +4253,10 @@ void nsysnet_shim_begin_title(void) {
     atomic_store(&probe_baseline_ai_mask, 0);
     atomic_store(&open_mask, 0);
     atomic_store(&ax_activity_pending, 0);
+
+    atomic_store(&ftp_native_bind_ip, 0);
+    atomic_store(&ftp_ax_redirect_active, 0);
+
     compat_state_reset_all();
     async_dns_reset_all();
 
