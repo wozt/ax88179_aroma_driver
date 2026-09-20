@@ -564,48 +564,6 @@ A real lease-expiration renew/rebind sequence remains to be tested.
 
 ---
 
-## RX implementation
-
-The current receive path uses:
-
-```text
-RX_ASYNC_SLOTS = 3
-```
-
-Three asynchronous UHS bulk-IN requests remain in flight.
-
-When one completes:
-
-```text
-USB completion
-    |
-copy aggregate
-    |
-immediately rearm slot
-    |
-parse AX88179 aggregate
-    |
-submit frames to lwIP
-```
-
-Buffers are aligned to:
-
-```text
-0x40
-```
-
-At sustainable rates, the UDP receive-capacity test reaches:
-
-```text
-368 / 368 packets
-```
-
-At approximately `147 Mbit/s` payload rate, some packets are still lost.
-
-This is the main remaining low-level performance problem.
-
----
-
 ## Title lifecycle
 
 The AX worker is recreated across title transitions.
@@ -700,7 +658,7 @@ DNS     = AX DHCP DNS
 
 ### 1. Finish RX performance
 
-Reach full packet retention during the approximately `147 Mbit/s` burst test.
+- [x] Full UDP RX burst capacity at ~147 Mbit/s payload is done
 
 ### 2. Validate DHCP renew/rebind
 
