@@ -4720,10 +4720,19 @@ static int add_patch(function_replacement_data_t *data, const char *name, int pr
         if (add_patch(&d, #name, process) < 0) goto fail;                         \
     } while (0)
 
+/*
+ * GAME + Wii U Menu must use ONE FunctionPatcher registration.
+ *
+ * REPLACE_FUNCTION_FOR_PROCESS stores &real_<name> in replaceCall.
+ * Registering GAME and MENU separately therefore makes two patches share
+ * the same real_* pointer and each patch may overwrite it with its own
+ * trampoline.
+ *
+ * FunctionPatcher provides GAME_AND_MENU specifically for this case.
+ */
 #define SHIM_PATCH(name)                                                          \
     do {                                                                          \
-        SHIM_PATCH_PROCESS(name, FP_TARGET_PROCESS_GAME);                         \
-        SHIM_PATCH_PROCESS(name, FP_TARGET_PROCESS_WII_U_MENU);                   \
+        SHIM_PATCH_PROCESS(name, FP_TARGET_PROCESS_GAME_AND_MENU);                 \
     } while (0)
 
 static int installed;
@@ -4748,42 +4757,36 @@ int nsysnet_shim_install(void)
     SHIM_TRACE(2, "FunctionPatcher v%u", version);
 
     /*
-     * 0.2.46 diagnostic:
-     * lifecycle tracing FunctionPatcher hooks intentionally disabled.
-     * Keep only the normal nsysnet socket hook group for this test.
+     * Standard shim hooks.
+     *
+     * Each SHIM_PATCH now creates ONE GAME_AND_MENU registration.
      */
+    SHIM_PATCH(socket);
+    SHIM_PATCH(socketclose);
+    SHIM_PATCH(socketclose_all);
+    SHIM_PATCH(bind);
+    SHIM_PATCH(connect);
+    SHIM_PATCH(listen);
+    SHIM_PATCH(accept);
+    SHIM_PATCH(shutdown);
+    SHIM_PATCH(send);
+    SHIM_PATCH(sendto);
+    SHIM_PATCH(sendto_multi);
+    SHIM_PATCH(sendto_multi_ex);
+    SHIM_PATCH(recv);
+    SHIM_PATCH(recvfrom);
+    SHIM_PATCH(recvfrom_ex);
+    SHIM_PATCH(recvfrom_multi);
+    SHIM_PATCH(select);
+    SHIM_PATCH(setsockopt);
+    SHIM_PATCH(getsockopt);
+    SHIM_PATCH(getsockname);
+    SHIM_PATCH(getpeername);
+    SHIM_PATCH(socketlasterr);
 
-    /*
-     * 0.2.48 socket hook bisection - group A1.
-     *
-     * 5 functions x GAME + Wii U Menu = 10 handles.
-     */
-    /*
-     * 0.2.50 bisection:
-     * A1 without socketclose_all.
-     *
-     * 4 functions x GAME + Wii U Menu = 8 handles.
-     */
-    /*
-     * 0.2.51 bisection:
-     * socket + socketclose only.
-     *
-     * 2 functions x GAME + Wii U Menu = 4 handles.
-     */
-    /*
-     * 0.2.56:
-     * One FunctionPatcher registration covers both GAME and Wii U Menu.
-     * Do not register the same replacement twice with two target processes:
-     * both registrations share real_socket.
-     */
-    SHIM_PATCH_PROCESS(
-        socket,
-        FP_TARGET_PROCESS_GAME_AND_MENU);
-
-    /*
-     * 0.2.46 diagnostic:
-     * NSSL hooks disabled to isolate the ordinary nsysnet socket hooks.
-     */
+    SHIM_PATCH(NSSLCreateConnection);
+    SHIM_PATCH(NSSLDestroyConnection);
+    SHIM_PATCH(NSSLFinish);
 
     if (!atomic_load(&system_dns)) {
         SHIM_PATCH(gethostbyname);
