@@ -218,6 +218,7 @@ static atomic_uint ftp_native_bind_ip;
 static atomic_int ftp_ax_redirect_active;
 
 static void nssl_relay_stop_all(void);
+static void nssl_relay_detach_public_fd(int fd);
 
 /*
  * nsysnet exposes several socket options which lwIP either does not
@@ -417,6 +418,128 @@ static int native_port(uint16_t net_port)
 {
     uint16_t port = nsn_ntohs(net_port);
     return port == AX_NATIVE_PORT_WIILOAD;
+}
+
+/*
+ * FTPiiU starts very early from its WUPS application-start callback.
+ *
+ * At that point the AX worker can still be inside its startup guard, so
+ * socket() legitimately falls back to nsysnet.  By the time FTPiiU later
+ * creates PASV sockets, however, AX may be ready.  That used to produce a
+ * split server:
+ *
+ *     control listener -> native/Wi-Fi
+ *     PASV listener    -> lwIP/AX
+ *
+ * and subsequent directory transfers could stall.
+ *
+ * The :21 bind is the first point where we can positively identify the
+ * early socket as FTP.  Keep its native descriptor as our public placeholder,
+ * wait a bounded amount of time for AX, then attach a fresh lwIP TCP socket
+ * to that same public descriptor.
+ *
+ * If AX never appears we leave the socket completely native, preserving the
+ * old Wi-Fi behaviour.
+ */
+#define FTP_EARLY_AX_WAIT_MS 35000
+
+static int ftp_adopt_early_native_listener(
+    int sockfd,
+    const struct nsn_sockaddr *addr,
+    socklen_t addrlen)
+{
+    if (!addr ||
+        addrlen < sizeof(struct nsn_sockaddr_in) ||
+        addr->sa_family != NSN_AF_INET ||
+        atomic_load(&force_native) ||
+        !shim_accepts())
+        return 0;
+
+    const struct nsn_sockaddr_in *in =
+        (const struct nsn_sockaddr_in *)addr;
+
+    if (nsn_ntohs(in->sin_port) != AX_FTP_PORT)
+        return 0;
+
+    SHIM_TRACE(
+        1,
+        "FTP early listener fd=%d waiting for AX",
+        sockfd);
+
+    OSTime deadline =
+        OSGetTime() +
+        OSMillisecondsToTicks(FTP_EARLY_AX_WAIT_MS);
+
+    while (shim_accepts() &&
+           !atomic_load(&force_native) &&
+           (!ax_net_stack_ready() || ax_net_ip4() == 0) &&
+           OSGetTime() < deadline) {
+        OSSleepTicks(OSMillisecondsToTicks(20));
+    }
+
+    if (!shim_accepts() ||
+        atomic_load(&force_native) ||
+        !ax_net_stack_ready() ||
+        ax_net_ip4() == 0) {
+        SHIM_TRACE(
+            1,
+            "FTP early listener fd=%d stays NATIVE",
+            sockfd);
+        return 0;
+    }
+
+    errno = 0;
+
+    int lwfd =
+        lwip_socket(AF_INET, SOCK_STREAM, 0);
+
+    if (lwfd < 0)
+        return 0;
+
+    /*
+     * FTPiiU sets SO_REUSEADDR before bind().  That call happened while the
+     * descriptor was still native, so reproduce the relevant state on the
+     * newly adopted lwIP socket.
+     */
+    int one = 1;
+    lwip_setsockopt(
+        lwfd,
+        SOL_SOCKET,
+        SO_REUSEADDR,
+        &one,
+        sizeof(one));
+
+    int native_sndbuf = 8192;
+    int native_rcvbuf = 8192;
+
+    lwip_setsockopt(
+        lwfd,
+        SOL_SOCKET,
+        SO_SNDBUF,
+        &native_sndbuf,
+        sizeof(native_sndbuf));
+
+    lwip_setsockopt(
+        lwfd,
+        SOL_SOCKET,
+        SO_RCVBUF,
+        &native_rcvbuf,
+        sizeof(native_rcvbuf));
+
+    /*
+     * sockfd itself remains open in nsysnet and becomes exactly the same
+     * kind of reserved public placeholder as sockets created normally by
+     * this shim.
+     */
+    track_fd(sockfd, lwfd);
+
+    SHIM_TRACE(
+        1,
+        "FTP adopted early native fd=%d -> lwfd=%d",
+        sockfd,
+        lwfd);
+
+    return 1;
 }
 
 /*
@@ -664,6 +787,12 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
 DECL_FUNCTION(int, socketclose, int sockfd)
 {
     if (is_foreign(sockfd)) {
+        /*
+         * It may be a public descriptor previously handed to NSSL.
+         * Detach it before nsysnet can recycle the descriptor number.
+         */
+        nssl_relay_detach_public_fd(sockfd);
+
         SHIM_TRACE(1, "close(fd=%d) -> NATIVE", sockfd);
         errno = -1;
         return real_socketclose(sockfd);
@@ -706,7 +835,16 @@ DECL_FUNCTION(int, socketclose_all, void)
 
 DECL_FUNCTION(int, bind, int sockfd, const struct nsn_sockaddr *addr, socklen_t addrlen)
 {
-    if (is_foreign(sockfd)) { errno = -1; return real_bind(sockfd, addr, addrlen); }
+    if (is_foreign(sockfd)) {
+        if (!ftp_adopt_early_native_listener(
+                sockfd,
+                addr,
+                addrlen)) {
+            errno = -1;
+            return real_bind(sockfd, addr, addrlen);
+        }
+    }
+
     errno = 0;
     struct sockaddr_in l;
     if (!sockaddr_to_lwip(&l, addr, addrlen)) { errno = EAFNOSUPPORT; return -1; }
@@ -2098,6 +2236,13 @@ struct nssl_relay {
     atomic_int stop;
     atomic_int done;
 
+    /*
+     * Public nsysnet descriptor handed to Nintendo NSSL.
+     * The relay owns only the transport behind it, but lifecycle teardown
+     * must still be able to interrupt this endpoint.
+     */
+    atomic_int public_fd;
+
     int native_fd;
     int lwfd;
     int error;
@@ -2113,6 +2258,31 @@ struct nssl_relay {
 };
 
 static struct nssl_relay nssl_relays[NSSL_RELAY_MAX];
+
+static void nssl_relay_detach_public_fd(int fd)
+{
+    for (int i = 0; i < NSSL_RELAY_MAX; ++i) {
+        struct nssl_relay *r =
+            &nssl_relays[i];
+
+        if (!atomic_load(&r->allocated))
+            continue;
+
+        int expected = fd;
+
+        if (atomic_compare_exchange_strong(
+                &r->public_fd,
+                &expected,
+                -1)) {
+            /*
+             * The title is closing the public transport normally.
+             * Stop its private relay as well.
+             */
+            atomic_store(&r->stop, 1);
+            return;
+        }
+    }
+}
 
 static int nssl_native_would_block(void)
 {
@@ -2142,6 +2312,7 @@ static void nssl_relay_reap(void)
 
         OSJoinThread(&r->thread, NULL);
 
+        atomic_store(&r->public_fd, -1);
         atomic_store(&r->allocated, 0);
     }
 }
@@ -2390,6 +2561,7 @@ static int nssl_relay_reserve(void)
         atomic_store(&r->ready, 0);
         atomic_store(&r->stop, 0);
         atomic_store(&r->done, 0);
+        atomic_store(&r->public_fd, -1);
 
         r->native_fd = -1;
         r->lwfd = -1;
@@ -2439,8 +2611,36 @@ static void nssl_relay_stop_all(void)
     int any = 0;
 
     for (int i = 0; i < NSSL_RELAY_MAX; ++i) {
-        if (atomic_load(&nssl_relays[i].allocated)) {
-            atomic_store(&nssl_relays[i].stop, 1);
+        struct nssl_relay *r =
+            &nssl_relays[i];
+
+        if (atomic_load(&r->allocated)) {
+            /*
+             * Do not merely kill the private relay.  Nintendo NSSL may
+             * still be blocked on the public localhost endpoint while the
+             * title is trying to leave.  Shutting its transport down makes
+             * that pending I/O observe EOF/error and lets NSSL unwind.
+             *
+             * Leave the descriptor itself open: normal title/socket cleanup
+             * remains responsible for close(), avoiding descriptor reuse
+             * races during transition.
+             */
+            int public_fd =
+                atomic_load(&r->public_fd);
+
+            if (public_fd >= 0) {
+                SHIM_TRACE(
+                    1,
+                    "NSSL title-exit shutdown public fd=%d slot=%d",
+                    public_fd,
+                    i);
+
+                real_shutdown(
+                    public_fd,
+                    SHUT_RDWR);
+            }
+
+            atomic_store(&r->stop, 1);
             any = 1;
         }
     }
@@ -2660,6 +2860,7 @@ static int bridge_ax_socket_to_nssl(
 
     r->native_fd = accepted;
     r->lwfd = lwfd;
+    atomic_store(&r->public_fd, sockfd);
 
     /*
      * From this point the public descriptor is a genuine nsysnet socket
