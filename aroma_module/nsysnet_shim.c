@@ -151,7 +151,7 @@ struct nsn_sendto_multi_ex_buffers {
 #define NSN_IP_UNKNOWN         14
 
 #define AX_FTP_PORT            21
-#define AX_WIILOAD_PORT        4299
+#define AX_NATIVE_PORT_WIILOAD 4299
 
 /* wut netdb values */
 #define NSN_HOST_NOT_FOUND 1
@@ -223,13 +223,6 @@ static atomic_int ftp_ax_redirect_active;
  * for a one-shot poll failure. FTPiiU then destroys/recreates it itself.
  */
 static atomic_uint ftp_restart_mask;
-
-/*
- * Wiiload starts before AX is ready and may already be blocked in a
- * native accept() on TCP :4299. Mark that listener for recreation once
- * AX becomes available.
- */
-static atomic_uint wiiload_restart_mask;
 
 /*
  * A relay can finish before Nintendo NSSL destroys the corresponding
@@ -444,6 +437,12 @@ static socklen_t sockaddr_to_nsn(struct nsn_sockaddr *out, socklen_t *outlen,
 static int set_nonblocking(int s, int on)
 {
     return lwip_ioctl(s, FIONBIO, &on);
+}
+
+static int native_port(uint16_t net_port)
+{
+    uint16_t port = nsn_ntohs(net_port);
+    return port == AX_NATIVE_PORT_WIILOAD;
 }
 
 /*
@@ -693,7 +692,6 @@ DECL_FUNCTION(int, socketclose, int sockfd)
     if (is_foreign(sockfd)) {
         if (sockfd >= 0 && sockfd < 32) {
             atomic_fetch_and(&ftp_restart_mask, ~(1u << sockfd));
-            atomic_fetch_and(&wiiload_restart_mask, ~(1u << sockfd));
 
             atomic_fetch_and(
                 &nssl_public_mask,
@@ -732,7 +730,6 @@ DECL_FUNCTION(int, socketclose, int sockfd)
 DECL_FUNCTION(int, socketclose_all, void)
 {
     atomic_store(&ftp_restart_mask, 0);
-    atomic_store(&wiiload_restart_mask, 0);
     atomic_store(&nssl_public_mask, 0);
 
     for (int fd = 0; fd < 32; ++fd)
@@ -770,6 +767,14 @@ DECL_FUNCTION(int, bind, int sockfd, const struct nsn_sockaddr *addr, socklen_t 
     struct sockaddr_in l;
     if (!sockaddr_to_lwip(&l, addr, addrlen)) { errno = EAFNOSUPPORT; return -1; }
     uint16_t port = nsn_ntohs(l.sin_port);
+
+    if (native_port(l.sin_port)) {
+        SHIM_TRACE(1, "bind(fd=%d,port=%u) -> NATIVE reserved", sockfd, port);
+        lwip_close(stack_fd(sockfd));
+        untrack_fd(sockfd);
+        errno = -1;
+        return real_bind(sockfd, addr, addrlen);
+    }
 
     int ftp_rewritten =
         ftp_rewrite_bind_to_ax(
@@ -838,21 +843,6 @@ DECL_FUNCTION(int, listen, int sockfd, int backlog)
 
 DECL_FUNCTION(int, accept, int sockfd, struct nsn_sockaddr *addr, socklen_t *addrlen)
 {
-    if (sockfd >= 0 && sockfd < 32) {
-        uint32_t bit = 1u << sockfd;
-
-        if (atomic_load(&wiiload_restart_mask) & bit) {
-            atomic_fetch_and(&wiiload_restart_mask, ~bit);
-
-            /*
-             * Wiiload treats an accept error other than EBUSY as a lost
-             * listener, closes it itself and recreates socket/bind/listen.
-             */
-            errno = EBADF;
-            return -1;
-        }
-    }
-
     if (is_foreign(sockfd)) {
         errno = -1;
         return real_accept(sockfd, addr, addrlen);
@@ -3105,6 +3095,523 @@ DECL_FUNCTION(int32_t, NSSLFinish, void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Wiiload AX -> native loopback proxy                                 */
+
+/*
+ * Keep Wiiload itself completely native.
+ *
+ * Wiiload owns its normal nsysnet listener on TCP :4299. This proxy owns
+ * a separate private lwIP listener on the AX address and forwards each
+ * connection to Wiiload through native 127.0.0.1:4299.
+ *
+ * None of these descriptors enter open_mask/mapped_fd.
+ */
+#define WIILOAD_PROXY_BUF 8192
+
+struct wiiload_proxy_state {
+    int listener_fd;
+    int ax_fd;
+    int native_fd;
+
+    int ax_rx_open;
+    int native_rx_open;
+    int ax_wr_shutdown;
+    int native_wr_shutdown;
+
+    size_t to_native_off;
+    size_t to_native_len;
+
+    size_t to_ax_off;
+    size_t to_ax_len;
+
+    uint64_t ax_to_native;
+    uint64_t native_to_ax;
+
+    uint8_t to_native[WIILOAD_PROXY_BUF];
+    uint8_t to_ax[WIILOAD_PROXY_BUF];
+};
+
+static struct wiiload_proxy_state wiiload_proxy = {
+    .listener_fd = -1,
+    .ax_fd = -1,
+    .native_fd = -1,
+};
+
+static void wiiload_proxy_reset_connection(void)
+{
+    if (wiiload_proxy.native_fd >= 0) {
+        real_shutdown(
+            wiiload_proxy.native_fd,
+            SHUT_RDWR);
+
+        real_socketclose(
+            wiiload_proxy.native_fd);
+
+        wiiload_proxy.native_fd = -1;
+    }
+
+    if (wiiload_proxy.ax_fd >= 0) {
+        lwip_shutdown(
+            wiiload_proxy.ax_fd,
+            SHUT_RDWR);
+
+        lwip_close(
+            wiiload_proxy.ax_fd);
+
+        wiiload_proxy.ax_fd = -1;
+    }
+
+    wiiload_proxy.ax_rx_open = 0;
+    wiiload_proxy.native_rx_open = 0;
+    wiiload_proxy.ax_wr_shutdown = 0;
+    wiiload_proxy.native_wr_shutdown = 0;
+
+    wiiload_proxy.to_native_off = 0;
+    wiiload_proxy.to_native_len = 0;
+    wiiload_proxy.to_ax_off = 0;
+    wiiload_proxy.to_ax_len = 0;
+
+    wiiload_proxy.ax_to_native = 0;
+    wiiload_proxy.native_to_ax = 0;
+}
+
+void nsysnet_shim_wiiload_proxy_stop(void)
+{
+    wiiload_proxy_reset_connection();
+
+    if (wiiload_proxy.listener_fd >= 0) {
+        lwip_close(
+            wiiload_proxy.listener_fd);
+
+        wiiload_proxy.listener_fd = -1;
+
+        WHBLogPrintf(
+            "AX: Wiiload proxy stopped");
+    }
+}
+
+int nsysnet_shim_wiiload_proxy_start(void)
+{
+    if (wiiload_proxy.listener_fd >= 0)
+        return 1;
+
+    if (atomic_load(&force_native) ||
+        !ax_net_stack_ready() ||
+        ax_net_ip4() == 0)
+        return 0;
+
+    int listener =
+        lwip_socket(
+            AF_INET,
+            SOCK_STREAM,
+            0);
+
+    if (listener < 0)
+        return -1;
+
+    int one = 1;
+
+    lwip_setsockopt(
+        listener,
+        SOL_SOCKET,
+        SO_REUSEADDR,
+        &one,
+        sizeof(one));
+
+    struct sockaddr_in local;
+    memset(&local, 0, sizeof(local));
+
+    local.sin_len = sizeof(local);
+    local.sin_family = AF_INET;
+    local.sin_port =
+        lwip_htons(AX_NATIVE_PORT_WIILOAD);
+
+    /*
+     * Bind specifically to AX, not INADDR_ANY.
+     * The real Wiiload server remains independently bound in nsysnet.
+     */
+    local.sin_addr.s_addr =
+        ax_net_ip4();
+
+    if (lwip_bind(
+            listener,
+            (struct sockaddr *)&local,
+            sizeof(local)) != 0) {
+
+        int e = errno;
+        lwip_close(listener);
+
+        WHBLogPrintf(
+            "AX: Wiiload proxy bind failed errno=%d",
+            e);
+
+        return -100 - e;
+    }
+
+    if (lwip_listen(listener, 1) != 0) {
+        int e = errno;
+        lwip_close(listener);
+
+        WHBLogPrintf(
+            "AX: Wiiload proxy listen failed errno=%d",
+            e);
+
+        return -200 - e;
+    }
+
+    int nonblocking = 1;
+
+    if (set_nonblocking(
+            listener,
+            nonblocking) != 0) {
+
+        int e = errno;
+        lwip_close(listener);
+
+        return -300 - e;
+    }
+
+    wiiload_proxy.listener_fd =
+        listener;
+
+    WHBLogPrintf(
+        "AX: Wiiload proxy listening %s:%d",
+        ax_net_address(),
+        AX_NATIVE_PORT_WIILOAD);
+
+    return 1;
+}
+
+static int wiiload_proxy_connect_native(void)
+{
+    int native_fd =
+        real_socket(
+            NSN_AF_INET,
+            SOCK_STREAM,
+            0);
+
+    if (native_fd < 0)
+        return -1;
+
+    struct nsn_sockaddr_in target;
+    memset(&target, 0, sizeof(target));
+
+    target.sin_family =
+        NSN_AF_INET;
+
+    target.sin_port =
+        lwip_htons(
+            AX_NATIVE_PORT_WIILOAD);
+
+    if (lwip_inet_pton(
+            AF_INET,
+            "127.0.0.1",
+            &target.sin_addr) != 1) {
+
+        real_socketclose(native_fd);
+        return -2;
+    }
+
+    errno = -1;
+
+    if (real_connect(
+            native_fd,
+            (const struct nsn_sockaddr *)&target,
+            sizeof(target)) != 0) {
+
+        int e = real_socketlasterr();
+
+        real_socketclose(native_fd);
+
+        WHBLogPrintf(
+            "AX: Wiiload proxy loopback connect failed err=%d",
+            e);
+
+        return -100 - e;
+    }
+
+    wiiload_proxy.native_fd =
+        native_fd;
+
+    return 0;
+}
+
+static void wiiload_proxy_drop(
+    const char *where,
+    int error)
+{
+    WHBLogPrintf(
+        "AX: Wiiload proxy drop %s err=%d ax_to_native=%llu native_to_ax=%llu",
+        where,
+        error,
+        (unsigned long long)
+            wiiload_proxy.ax_to_native,
+        (unsigned long long)
+            wiiload_proxy.native_to_ax);
+
+    wiiload_proxy_reset_connection();
+}
+
+void nsysnet_shim_wiiload_proxy_poll(void)
+{
+    if (wiiload_proxy.listener_fd < 0)
+        return;
+
+    /*
+     * No active transfer: poll the private AX listener.
+     */
+    if (wiiload_proxy.ax_fd < 0) {
+        errno = 0;
+
+        int ax_fd =
+            lwip_accept(
+                wiiload_proxy.listener_fd,
+                NULL,
+                NULL);
+
+        if (ax_fd < 0) {
+            if (errno == EWOULDBLOCK ||
+                errno == EAGAIN)
+                return;
+
+            return;
+        }
+
+        int nonblocking = 1;
+        set_nonblocking(
+            ax_fd,
+            nonblocking);
+
+        wiiload_proxy.ax_fd =
+            ax_fd;
+
+        if (wiiload_proxy_connect_native() != 0) {
+            wiiload_proxy_reset_connection();
+            return;
+        }
+
+        wiiload_proxy.ax_rx_open = 1;
+        wiiload_proxy.native_rx_open = 1;
+        wiiload_proxy.ax_wr_shutdown = 0;
+        wiiload_proxy.native_wr_shutdown = 0;
+
+        wiiload_proxy.to_native_off = 0;
+        wiiload_proxy.to_native_len = 0;
+        wiiload_proxy.to_ax_off = 0;
+        wiiload_proxy.to_ax_len = 0;
+
+        wiiload_proxy.ax_to_native = 0;
+        wiiload_proxy.native_to_ax = 0;
+
+        WHBLogPrintf(
+            "AX: Wiiload proxy connected AX -> 127.0.0.1:%d",
+            AX_NATIVE_PORT_WIILOAD);
+    }
+
+    /*
+     * Pump several nonblocking chunks per AX worker iteration.
+     * Both directions remain independent so TCP half-close works.
+     */
+    for (int iteration = 0;
+         iteration < 64;
+         ++iteration) {
+
+        int progress = 0;
+
+        /*
+         * PC/AX -> native Wiiload.
+         */
+        if (wiiload_proxy.to_native_len) {
+            int n =
+                real_send(
+                    wiiload_proxy.native_fd,
+                    wiiload_proxy.to_native +
+                        wiiload_proxy.to_native_off,
+                    wiiload_proxy.to_native_len,
+                    NSN_MSG_DONTWAIT);
+
+            if (n > 0) {
+                wiiload_proxy.ax_to_native +=
+                    (uint64_t)n;
+
+                wiiload_proxy.to_native_off +=
+                    (size_t)n;
+
+                wiiload_proxy.to_native_len -=
+                    (size_t)n;
+
+                if (!wiiload_proxy.to_native_len)
+                    wiiload_proxy.to_native_off = 0;
+
+                progress = 1;
+            } else if (n < 0) {
+                int e =
+                    real_socketlasterr();
+
+                if (e != NSN_ERR_WOULDBLOCK) {
+                    wiiload_proxy_drop(
+                        "native-send",
+                        e);
+                    return;
+                }
+            }
+        }
+
+        if (!wiiload_proxy.to_native_len &&
+            wiiload_proxy.ax_rx_open) {
+
+            errno = 0;
+
+            int n =
+                lwip_recv(
+                    wiiload_proxy.ax_fd,
+                    wiiload_proxy.to_native,
+                    sizeof(
+                        wiiload_proxy.to_native),
+                    MSG_DONTWAIT);
+
+            if (n > 0) {
+                wiiload_proxy.to_native_off = 0;
+                wiiload_proxy.to_native_len =
+                    (size_t)n;
+
+                progress = 1;
+            } else if (n == 0) {
+                wiiload_proxy.ax_rx_open = 0;
+                progress = 1;
+            } else if (errno != EWOULDBLOCK &&
+                       errno != EAGAIN) {
+
+                wiiload_proxy_drop(
+                    "ax-recv",
+                    errno);
+                return;
+            }
+        }
+
+        if (!wiiload_proxy.ax_rx_open &&
+            !wiiload_proxy.to_native_len &&
+            !wiiload_proxy.native_wr_shutdown) {
+
+            real_shutdown(
+                wiiload_proxy.native_fd,
+                SHUT_WR);
+
+            wiiload_proxy.native_wr_shutdown = 1;
+            progress = 1;
+        }
+
+        /*
+         * Native Wiiload -> PC/AX.
+         */
+        if (wiiload_proxy.to_ax_len) {
+            errno = 0;
+
+            int n =
+                lwip_send(
+                    wiiload_proxy.ax_fd,
+                    wiiload_proxy.to_ax +
+                        wiiload_proxy.to_ax_off,
+                    wiiload_proxy.to_ax_len,
+                    MSG_DONTWAIT);
+
+            if (n > 0) {
+                wiiload_proxy.native_to_ax +=
+                    (uint64_t)n;
+
+                wiiload_proxy.to_ax_off +=
+                    (size_t)n;
+
+                wiiload_proxy.to_ax_len -=
+                    (size_t)n;
+
+                if (!wiiload_proxy.to_ax_len)
+                    wiiload_proxy.to_ax_off = 0;
+
+                progress = 1;
+            } else if (n < 0 &&
+                       errno != EWOULDBLOCK &&
+                       errno != EAGAIN) {
+
+                wiiload_proxy_drop(
+                    "ax-send",
+                    errno);
+                return;
+            }
+        }
+
+        if (!wiiload_proxy.to_ax_len &&
+            wiiload_proxy.native_rx_open) {
+
+            int n =
+                real_recv(
+                    wiiload_proxy.native_fd,
+                    wiiload_proxy.to_ax,
+                    sizeof(
+                        wiiload_proxy.to_ax),
+                    NSN_MSG_DONTWAIT);
+
+            if (n > 0) {
+                wiiload_proxy.to_ax_off = 0;
+                wiiload_proxy.to_ax_len =
+                    (size_t)n;
+
+                progress = 1;
+            } else if (n == 0) {
+                wiiload_proxy.native_rx_open = 0;
+                progress = 1;
+            } else {
+                int e =
+                    real_socketlasterr();
+
+                if (e != NSN_ERR_WOULDBLOCK) {
+                    if (nssl_native_peer_closed(e)) {
+                        wiiload_proxy.native_rx_open = 0;
+                        progress = 1;
+                    } else {
+                        wiiload_proxy_drop(
+                            "native-recv",
+                            e);
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (!wiiload_proxy.native_rx_open &&
+            !wiiload_proxy.to_ax_len &&
+            !wiiload_proxy.ax_wr_shutdown) {
+
+            lwip_shutdown(
+                wiiload_proxy.ax_fd,
+                SHUT_WR);
+
+            wiiload_proxy.ax_wr_shutdown = 1;
+            progress = 1;
+        }
+
+        if (!wiiload_proxy.ax_rx_open &&
+            !wiiload_proxy.native_rx_open &&
+            !wiiload_proxy.to_native_len &&
+            !wiiload_proxy.to_ax_len) {
+
+            WHBLogPrintf(
+                "AX: Wiiload proxy transfer done ax_to_native=%llu native_to_ax=%llu",
+                (unsigned long long)
+                    wiiload_proxy.ax_to_native,
+                (unsigned long long)
+                    wiiload_proxy.native_to_ax);
+
+            wiiload_proxy_reset_connection();
+            return;
+        }
+
+        if (!progress)
+            break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* DNS                                                                 */
 
 /*
@@ -4478,102 +4985,6 @@ DECL_FUNCTION(const char *, gai_strerror, int ecode)
  * a new socket after AX/shim is ready, so bind(:21) goes through lwIP and
  * ftp_rewrite_bind_to_ax().
  */
-
-/*
- * Move Wiiload's pre-AX native TCP :4299 listener to AX.
- *
- * Wiiload blocks in accept(). Mark the listener first, then shutdown the
- * native listener to wake an accept already in progress. Wiiload owns the
- * fd and performs the final close/recreate itself.
- */
-int nsysnet_shim_request_wiiload_handoff(void)
-{
-    if (!shim_accepts() ||
-        atomic_load(&force_native) ||
-        !ax_net_stack_ready() ||
-        ax_net_ip4() == 0)
-        return 0;
-
-    int marked = 0;
-
-    for (int fd = 0; fd < 32; ++fd) {
-        uint32_t bit = 1u << fd;
-
-        if (!is_foreign(fd) ||
-            (atomic_load(&wiiload_restart_mask) & bit))
-            continue;
-
-        struct nsn_sockaddr_in local;
-        socklen_t local_len = sizeof(local);
-
-        memset(&local, 0, sizeof(local));
-
-        errno = -1;
-
-        if (real_getsockname(
-                fd,
-                (struct nsn_sockaddr *)&local,
-                &local_len) != 0)
-            continue;
-
-        if (local.sin_family != NSN_AF_INET ||
-            nsn_ntohs(local.sin_port) != AX_WIILOAD_PORT)
-            continue;
-
-        int type = 0;
-        socklen_t type_len = sizeof(type);
-
-        errno = -1;
-
-        if (real_getsockopt(
-                fd,
-                NSN_SOL_SOCKET,
-                NSN_SO_TYPE,
-                &type,
-                &type_len) != 0 ||
-            type != SOCK_STREAM)
-            continue;
-
-        /*
-         * A listener has no connected peer. Do not touch an accepted
-         * Wiiload client connection which also has local port 4299.
-         */
-        struct nsn_sockaddr_in peer;
-        socklen_t peer_len = sizeof(peer);
-
-        memset(&peer, 0, sizeof(peer));
-
-        errno = -1;
-
-        if (real_getpeername(
-                fd,
-                (struct nsn_sockaddr *)&peer,
-                &peer_len) == 0)
-            continue;
-
-        atomic_fetch_or(
-            &wiiload_restart_mask,
-            bit);
-
-        /*
-         * Wake a native accept() that may already be blocked.
-         * Wiiload remains responsible for closing the descriptor.
-         */
-        errno = -1;
-        int wake_rc =
-            real_shutdown(fd, SHUT_RDWR);
-
-        WHBLogPrintf(
-            "AX: Wiiload handoff marked native listener fd=%d shutdown=%d",
-            fd,
-            wake_rc);
-
-        marked++;
-    }
-
-    return marked;
-}
-
 int nsysnet_shim_request_ftp_handoff(void)
 {
     if (!shim_accepts() ||
@@ -4842,6 +5253,12 @@ fail:
 /* Registration persists, but fd/heap/thread ownership does not. Never
  * infer that a surviving patch makes per-title lwIP state valid. */
 void nsysnet_shim_stop_accepting(void) {
+    /*
+     * Private proxy sockets belong to this module, never to the title.
+     * Retire them before tearing down the title's lwIP state.
+     */
+    nsysnet_shim_wiiload_proxy_stop();
+
     nsysnet_shim_quiesce();
 
     /*
@@ -4878,7 +5295,6 @@ void nsysnet_shim_begin_title(void) {
     atomic_store(&ftp_native_bind_ip, 0);
     atomic_store(&ftp_ax_redirect_active, 0);
     atomic_store(&ftp_restart_mask, 0);
-    atomic_store(&wiiload_restart_mask, 0);
 
     atomic_store(&nssl_public_mask, 0);
 
