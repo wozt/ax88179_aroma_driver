@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.57-combined-process-hooks");
+WUMS_MODULE_VERSION("0.2.58-restore-devoptab-fini");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -120,14 +120,7 @@ WUMS_HOOK_EX(
  */
 void ax_fini_wut_devoptab(void)
 {
-    /*
-     * Diagnostic 0.2.45:
-     *
-     * Do not tear down this module's WUT/FSA devoptab during title exit.
-     * We want to determine whether __fini_wut_devoptab() itself is what
-     * prevents the Wii U Menu -> game transition from completing.
-     */
-    exit_trace("FINI_WUT_DEVOPTAB skipped");
+    __fini_wut_devoptab();
 }
 
 WUMS_HOOK_EX(
