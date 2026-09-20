@@ -9,6 +9,7 @@
 #include "../tests/uhs_mock.h"
 #else
 #include <coreinit/cache.h>
+#include <coreinit/event.h>
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <nsysuhs/uhs.h>
@@ -192,6 +193,13 @@ struct AxRxAsyncSlot {
 
 static struct AxRxAsyncSlot g_rx_slots[RX_ASYNC_SLOTS];
 
+/*
+ * Wake the network worker as soon as any asynchronous UHS RX transfer
+ * completes. Auto-reset is sufficient because one wake causes the
+ * worker to drain every completed slot currently available.
+ */
+static OSEvent g_rx_event;
+
 static uint8_t g_tx[2048] __attribute__((aligned(0x40)));
 static UhsInterfaceProfile g_profiles[MAX_IFACES] __attribute__((aligned(0x40)));
 /* Static DMA buffers: one instance, called serially by its owner thread. */
@@ -252,6 +260,13 @@ ax_rx_async_callback(
         &slot->state,
         AX_RX_SLOT_DONE,
         memory_order_release);
+
+    /*
+     * Wake the UHS owner immediately instead of relying on periodic
+     * polling. If nobody is currently waiting, the auto event remains
+     * signalled until the next wait.
+     */
+    OSSignalEvent(&g_rx_event);
 }
 
 static int
@@ -303,6 +318,12 @@ ax_rx_start_async(
     Ax88179 *ax)
 {
     ax->rx_consume = 0;
+
+    OSInitEvent(
+        &g_rx_event,
+        FALSE,
+        OS_EVENT_MODE_AUTO);
+
     ax->rx_async_started = 1;
 
     for (unsigned i = 0;
@@ -931,8 +952,6 @@ ax88179_receive(
     int max_length,
     int timeout_us)
 {
-    (void)timeout_us;
-
     if (!ax || !frame ||
         max_length < 14) {
         return -1;
@@ -959,20 +978,38 @@ ax88179_receive(
     return 0;
 #else
     /*
-     * First active receive starts three UHS bulk-IN requests. Subsequent
-     * calls merely harvest completed slots; there is no blocking USB wait
-     * in this path.
+     * First active receive starts the asynchronous UHS ring.
+     *
+     * The USB transfers themselves remain permanently asynchronous.
+     * timeout_us only controls how long the owner thread may sleep while
+     * waiting for a completion event.
      */
     if (!ax->rx_async_started) {
         if (ax_rx_start_async(ax) != 0) {
             return -1;
         }
-
-        return 0;
     }
 
     int loaded =
         ax_rx_take_completed(ax);
+
+    /*
+     * Nothing completed yet. Sleep until a UHS callback signals the
+     * auto-reset event or until the caller's timeout expires.
+     *
+     * There is no lost-wakeup race here: if the callback fires between
+     * ax_rx_take_completed() and OSWaitEventWithTimeout(), the event is
+     * already signalled and the wait returns immediately.
+     */
+    if (loaded == 0 && timeout_us > 0) {
+        OSWaitEventWithTimeout(
+            &g_rx_event,
+            OSMicrosecondsToTicks(
+                (uint64_t)timeout_us));
+
+        loaded =
+            ax_rx_take_completed(ax);
+    }
 
     if (loaded <= 0) {
         return loaded;

@@ -283,21 +283,12 @@ int ax_net_poll(void)
         }
     }
     drain_tx(iface.state, 1);
-    /* One bounded receive; timers live in the tcpip thread now. */
     /*
-     * The wait is in microseconds, not milliseconds, and it costs about
-     * a millisecond of IPC on top: asking for 100 took 985us, asking for
-     * 1000 took 1990us. So this is a 5 ms wait.
+     * Wait for an asynchronous UHS completion for at most 5 ms.
      *
-     * A bulk IN completes the moment the adapter has a frame, so the
-     * wait only ever runs to the end on an idle link -- the frame is
-     * handed to the stack as it arrives rather than on the next turn of
-     * a polling loop, which is where the latency was coming from. The
-     * cost is the other direction: a frame this stack wants to send on
-     * its own initiative waits for the current read to finish, so this
-     * value is a ceiling on transmit latency as much as a floor on
-     * idle CPU. Five milliseconds is the compromise; a transmit-heavy
-     * load wants the sending moved off this thread entirely.
+     * The bulk-IN requests themselves remain continuously in flight.
+     * The timeout only bounds how long the worker sleeps on the RX
+     * completion event when the link is idle.
      */
     int n =
         ax88179_receive(
@@ -354,16 +345,9 @@ int ax_net_poll(void)
      */
     drain_tx(iface.state, 1);
     /*
-     * RX is fully asynchronous now. ax88179_receive() only harvests
-     * completed UHS slots; it no longer performs a blocking bulk-IN wait.
-     *
-     * Do not keep the old 2 ms idle sleep here. At ~147 Mbit/s, sleeping
-     * for 2 ms after observing an incomplete slot can allow all pending
-     * DMA slots and the device FIFO to fill before the worker runs again.
-     *
-     * This busy-poll behavior is currently intentional for RX burst
-     * characterization. If it closes the high-rate loss gap, replace it
-     * with callback-driven or adaptive pacing afterward.
+     * Idle pacing now happens inside ax88179_receive() through the UHS
+     * completion event. Do not add an additional sleep here: the previous
+     * 2 ms delay was enough to cause packet loss during ~147 Mbit/s bursts.
      */
     return n;
 }
