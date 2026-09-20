@@ -224,6 +224,15 @@ static atomic_int ftp_ax_redirect_active;
  */
 static atomic_uint ftp_restart_mask;
 
+/*
+ * A relay can finish before Nintendo NSSL destroys the corresponding
+ * connection. Track the public native transport independently from the
+ * relay slot so title teardown can still wake every outstanding NSSL
+ * connection.
+ */
+static atomic_uint nssl_public_mask;
+static atomic_int nssl_connection_by_fd[32];
+
 static void nssl_relay_stop_all(void);
 static void nssl_relay_detach_public_fd(int fd);
 
@@ -681,8 +690,17 @@ DECL_FUNCTION(int, socket, int domain, int type, int protocol)
 DECL_FUNCTION(int, socketclose, int sockfd)
 {
     if (is_foreign(sockfd)) {
-        if (sockfd >= 0 && sockfd < 32)
+        if (sockfd >= 0 && sockfd < 32) {
             atomic_fetch_and(&ftp_restart_mask, ~(1u << sockfd));
+
+            atomic_fetch_and(
+                &nssl_public_mask,
+                ~(1u << sockfd));
+
+            atomic_store(
+                &nssl_connection_by_fd[sockfd],
+                -1);
+        }
 
         /*
          * It may be a public descriptor previously handed to NSSL.
@@ -712,6 +730,12 @@ DECL_FUNCTION(int, socketclose, int sockfd)
 DECL_FUNCTION(int, socketclose_all, void)
 {
     atomic_store(&ftp_restart_mask, 0);
+    atomic_store(&nssl_public_mask, 0);
+
+    for (int fd = 0; fd < 32; ++fd)
+        atomic_store(
+            &nssl_connection_by_fd[fd],
+            -1);
 
     if (!shim_accepts()) {
         SHIM_TRACE(1, "close_all -> NATIVE");
@@ -2180,6 +2204,171 @@ struct nssl_relay {
 
 static struct nssl_relay nssl_relays[NSSL_RELAY_MAX];
 
+
+/*
+ * Keep NSSL lifetime separate from relay lifetime.
+ */
+static void nssl_track_public_connection(
+    int fd,
+    int32_t connection)
+{
+    if (fd < 0 ||
+        fd >= 32 ||
+        connection < 0)
+        return;
+
+    atomic_store(
+        &nssl_connection_by_fd[fd],
+        connection);
+
+    atomic_fetch_or(
+        &nssl_public_mask,
+        1u << fd);
+}
+
+
+static void nssl_untrack_public_fd(int fd)
+{
+    if (fd < 0 ||
+        fd >= 32)
+        return;
+
+    atomic_fetch_and(
+        &nssl_public_mask,
+        ~(1u << fd));
+
+    atomic_store(
+        &nssl_connection_by_fd[fd],
+        -1);
+}
+
+
+/*
+ * Protect against a stale descriptor number.
+ *
+ * Every bridge public fd must still be connected to 127.0.0.1. If the fd
+ * has already disappeared/recycled, never touch whatever now owns that
+ * number.
+ */
+static int nssl_public_fd_is_loopback(int fd)
+{
+    struct nsn_sockaddr_in peer;
+    socklen_t peer_len = sizeof(peer);
+
+    memset(&peer, 0, sizeof(peer));
+
+    errno = -1;
+
+    if (real_getpeername(
+            fd,
+            (struct nsn_sockaddr *)&peer,
+            &peer_len) != 0)
+        return 0;
+
+    if (peer.sin_family != NSN_AF_INET)
+        return 0;
+
+    const uint8_t *ip =
+        (const uint8_t *)&peer.sin_addr;
+
+    return ip[0] == 127 &&
+           ip[1] == 0 &&
+           ip[2] == 0 &&
+           ip[3] == 1;
+}
+
+
+/*
+ * Wake all transports belonging to one Nintendo NSSL handle.
+ */
+static int nssl_shutdown_connection_transport(
+    int32_t connection,
+    const char *reason)
+{
+    uint32_t mask =
+        atomic_load(&nssl_public_mask);
+
+    int count = 0;
+
+    for (int fd = 0; fd < 32; ++fd) {
+        if (!(mask & (1u << fd)))
+            continue;
+
+        if (atomic_load(
+                &nssl_connection_by_fd[fd]) !=
+            connection)
+            continue;
+
+        if (!nssl_public_fd_is_loopback(fd)) {
+            nssl_untrack_public_fd(fd);
+            continue;
+        }
+
+        WHBLogPrintf(
+            "AX: NSSL %s shutdown conn=%d fd=%d",
+            reason,
+            connection,
+            fd);
+
+        real_shutdown(
+            fd,
+            SHUT_RDWR);
+
+        count++;
+    }
+
+    return count;
+}
+
+
+/*
+ * Wake EVERY NSSL transport still alive for the title.
+ */
+static int nssl_shutdown_all_tracked(
+    const char *reason)
+{
+    uint32_t mask =
+        atomic_load(&nssl_public_mask);
+
+    if (!mask)
+        return 0;
+
+    WHBLogPrintf(
+        "AX: NSSL %s tracked mask=%08x",
+        reason,
+        (unsigned)mask);
+
+    int count = 0;
+
+    for (int fd = 0; fd < 32; ++fd) {
+        if (!(mask & (1u << fd)))
+            continue;
+
+        int32_t connection =
+            atomic_load(
+                &nssl_connection_by_fd[fd]);
+
+        if (!nssl_public_fd_is_loopback(fd)) {
+            nssl_untrack_public_fd(fd);
+            continue;
+        }
+
+        WHBLogPrintf(
+            "AX: NSSL %s shutdown conn=%d fd=%d",
+            reason,
+            connection,
+            fd);
+
+        real_shutdown(
+            fd,
+            SHUT_RDWR);
+
+        count++;
+    }
+
+    return count;
+}
+
 static void nssl_relay_detach_public_fd(int fd)
 {
     for (int i = 0; i < NSSL_RELAY_MAX; ++i) {
@@ -2848,9 +3037,102 @@ DECL_FUNCTION(int32_t, NSSLCreateConnection,
             ? "bridge"
             : "native");
 
-    if (relay_slot >= 0 &&
-        result < 0)
-        nssl_relay_stop_slot(relay_slot);
+    if (relay_slot >= 0) {
+        if (result < 0) {
+            nssl_relay_stop_slot(
+                relay_slot);
+        } else {
+            nssl_track_public_connection(
+                sockfd,
+                result);
+
+            WHBLogPrintf(
+                "AX: NSSL track conn=%d fd=%d",
+                result,
+                sockfd);
+        }
+    }
+
+    return result;
+}
+
+
+/*
+ * Wake the localhost transport BEFORE asking Nintendo NSSL to destroy the
+ * connection. This prevents its teardown from waiting indefinitely for
+ * more TLS/socket traffic from a relay which has already ended.
+ */
+DECL_FUNCTION(int32_t, NSSLDestroyConnection,
+              int32_t connection)
+{
+    int tracked =
+        nssl_shutdown_connection_transport(
+            connection,
+            "destroy");
+
+    WHBLogPrintf(
+        "AX: NSSLDestroyConnection begin conn=%d tracked=%d",
+        connection,
+        tracked);
+
+    int32_t result =
+        real_NSSLDestroyConnection(
+            connection);
+
+    WHBLogPrintf(
+        "AX: NSSLDestroyConnection end conn=%d result=%d",
+        connection,
+        result);
+
+    uint32_t mask =
+        atomic_load(&nssl_public_mask);
+
+    for (int fd = 0; fd < 32; ++fd) {
+        if (!(mask & (1u << fd)))
+            continue;
+
+        if (atomic_load(
+                &nssl_connection_by_fd[fd]) !=
+            connection)
+            continue;
+
+        nssl_relay_detach_public_fd(fd);
+        nssl_untrack_public_fd(fd);
+    }
+
+    return result;
+}
+
+
+/*
+ * NSSLFinish is another possible title-exit choke point.
+ *
+ * Ensure every remaining bridged connection observes a dead transport
+ * before letting Nintendo's global NSSL cleanup proceed.
+ */
+DECL_FUNCTION(int32_t, NSSLFinish, void)
+{
+    nssl_shutdown_all_tracked(
+        "finish");
+
+    WHBLogPrintf(
+        "AX: NSSLFinish begin");
+
+    int32_t result =
+        real_NSSLFinish();
+
+    WHBLogPrintf(
+        "AX: NSSLFinish end result=%d",
+        result);
+
+    atomic_store(
+        &nssl_public_mask,
+        0);
+
+    for (int fd = 0; fd < 32; ++fd)
+        atomic_store(
+            &nssl_connection_by_fd[fd],
+            -1);
 
     return result;
 }
@@ -4456,6 +4738,8 @@ int nsysnet_shim_install(void)
      * their reserved nsysnet placeholder at the TLS boundary.
      */
     SHIM_PATCH(NSSLCreateConnection);
+    SHIM_PATCH(NSSLDestroyConnection);
+    SHIM_PATCH(NSSLFinish);
 
     if (!atomic_load(&system_dns)) {
         SHIM_PATCH(gethostbyname);
@@ -4486,6 +4770,17 @@ fail:
  * infer that a surviving patch makes per-title lwIP state valid. */
 void nsysnet_shim_stop_accepting(void) {
     nsysnet_shim_quiesce();
+
+    /*
+     * The relay of an HTTP request may already have ended while Nintendo
+     * NSSL still owns its public localhost socket.
+     *
+     * Wake every tracked NSSL transport, not merely the public fd stored in
+     * the last surviving relay slot.
+     */
+    nssl_shutdown_all_tracked(
+        "title-exit");
+
     nssl_relay_stop_all();
 }
 void nsysnet_shim_begin_title(void) {
@@ -4510,6 +4805,13 @@ void nsysnet_shim_begin_title(void) {
     atomic_store(&ftp_native_bind_ip, 0);
     atomic_store(&ftp_ax_redirect_active, 0);
     atomic_store(&ftp_restart_mask, 0);
+
+    atomic_store(&nssl_public_mask, 0);
+
+    for (int fd = 0; fd < 32; ++fd)
+        atomic_store(
+            &nssl_connection_by_fd[fd],
+            -1);
 
     compat_state_reset_all();
     async_dns_reset_all();
