@@ -4771,10 +4771,12 @@ int nsysnet_shim_install(void)
      * 2 functions x GAME + Wii U Menu = 4 handles.
      */
     /*
-     * 0.2.53 bisection:
-     * socket only.
+     * 0.2.54 bisection:
+     * socket hook on Wii U Menu only.
      */
-    SHIM_PATCH(socket);
+    SHIM_PATCH_PROCESS(
+        socket,
+        FP_TARGET_PROCESS_WII_U_MENU);
 
     /*
      * 0.2.46 diagnostic:
