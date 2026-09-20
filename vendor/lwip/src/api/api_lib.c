@@ -580,6 +580,9 @@ netconn_recv_data(struct netconn *conn, void **new_buf, u8_t apiflags)
 {
   void *buf = NULL;
   u16_t len;
+#if LWIP_SO_RCVBUF
+  int recv_accounted;
+#endif /* LWIP_SO_RCVBUF */
 
   LWIP_ERROR("netconn_recv: invalid pointer", (new_buf != NULL), return ERR_ARG;);
   *new_buf = NULL;
@@ -660,9 +663,22 @@ netconn_recv_data(struct netconn *conn, void **new_buf, u8_t apiflags)
 #endif /* (LWIP_UDP || LWIP_RAW) */
 
 #if LWIP_SO_RCVBUF
-  SYS_ARCH_DEC(conn->recv_avail, len);
+  recv_accounted = (int)len;
+
+#if LWIP_UDP
+  /*
+   * Match the +16 bytes added for each queued UDP datagram in
+   * recv_udp(). TCP and RAW accounting remain unchanged.
+   */
+  if (NETCONNTYPE_GROUP(conn->type) == NETCONN_UDP) {
+    recv_accounted += 16;
+  }
+#endif /* LWIP_UDP */
+
+  SYS_ARCH_DEC(conn->recv_avail, recv_accounted);
 #endif /* LWIP_SO_RCVBUF */
-  /* Register event with callback */
+
+  /* Register event with callback using actual payload length. */
   API_EVENT(conn, NETCONN_EVT_RCVMINUS, len);
 
   LWIP_DEBUGF(API_LIB_DEBUG, ("netconn_recv_data: received %p, len=%"U16_F"\n", buf, len));

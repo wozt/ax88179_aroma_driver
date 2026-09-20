@@ -233,6 +233,7 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
   err_t err;
 #if LWIP_SO_RCVBUF
   int recv_avail;
+  int recv_accounted;
 #endif /* LWIP_SO_RCVBUF */
 
   LWIP_UNUSED_ARG(pcb); /* only used for asserts... */
@@ -248,9 +249,20 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
   LWIP_ASSERT("recv_udp: recv for wrong pcb!", conn->pcb.udp == pcb);
 
 #if LWIP_SO_RCVBUF
+  /*
+   * Native Wii U nsysnet accounts 16 bytes of per-datagram metadata
+   * in SO_RXDATA / SO_RCVBUF accounting:
+   *
+   *   queued = payload + 16 bytes per UDP datagram
+   *
+   * Example measured on hardware:
+   *   46 * (1400 + 16) = 65136
+   */
+  recv_accounted = (int)p->tot_len + 16;
+
   SYS_ARCH_GET(conn->recv_avail, recv_avail);
   if (!NETCONN_MBOX_VALID(conn, &conn->recvmbox) ||
-      ((recv_avail + (int)(p->tot_len)) > conn->recv_bufsize)) {
+      ((recv_avail + recv_accounted) > conn->recv_bufsize)) {
 #else  /* LWIP_SO_RCVBUF */
   if (!NETCONN_MBOX_VALID(conn, &conn->recvmbox)) {
 #endif /* LWIP_SO_RCVBUF */
@@ -296,9 +308,9 @@ recv_udp(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     return;
   } else {
 #if LWIP_SO_RCVBUF
-    SYS_ARCH_INC(conn->recv_avail, len);
+    SYS_ARCH_INC(conn->recv_avail, recv_accounted);
 #endif /* LWIP_SO_RCVBUF */
-    /* Register event with callback */
+    /* Register event with callback using actual payload length. */
     API_EVENT(conn, NETCONN_EVT_RCVPLUS, len);
   }
 }
