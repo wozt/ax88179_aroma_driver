@@ -19,7 +19,7 @@
 [✓] émission multicast réelle
 
 [✓] limites négatives exactes SNDBUF/RCVBUF
-[ ] parité exacte SNDBUF / backpressure (écart résiduel à 4096)
+[✓] parité exacte SNDBUF / backpressure
 [✓] parité réelle RCVBUF / SO_RXDATA
 [✓] TCP listen / accept réel
 [✓] sendto_multi_ex
@@ -28,8 +28,8 @@
 [✓] sendto_multi
 [ ] parité UDP SO_RXDATA (natif = payload + 16 octets/datagramme)
 [✓] gethostbyaddr
-[ ] DNS async / variantes restantes
-[ ] NSSL Nintendo : détourner le transport TLS vers lwIP/AX
+[✓] DNS async / variantes
+[✓] NSSL Nintendo : bridge natif -> relay lwIP/AX validé
 [✓] hot-unplug / reconnect
 [✓] perte/restauration link
 [✓] DHCP recovery après recréation interface
@@ -281,11 +281,39 @@ Cas validés fonctionnellement :
 
 La récupération après backpressure fonctionne.
 
-Écart encore ouvert :
+Parité exacte SNDBUF / backpressure validée sur matériel.
 
-    SNDBUF=4096
+Le probe single-shot utilise un buffer de 128 KiB aligné sur 0x40 afin
+d'éviter le découpage IOSVec effectué par le wrapper nsysnet natif.
 
-Le comportement est fonctionnel mais le nombre exact d'octets acceptés avant EWOULDBLOCK diffère encore du natif.
+Capacité interne observée :
+
+    SO_SNDBUF     natif     AX
+    1             1360      1360
+    4096          5440      5440
+    8192          9520      9520
+    16384         17680     17680
+    65535         66640     66640
+
+Relation native observée :
+
+    effective = ceil(SO_SNDBUF / 1360) * 1360
+
+La valeur visible retournée par getsockopt(SO_SNDBUF) reste exactement
+celle demandée.
+
+Pour chaque cas, après le premier send() remplissant la capacité interne,
+le second send() non bloquant retourne :
+
+    errno=11
+    socketlasterr=6
+    EWOULDBLOCK
+
+Le cas SO_SNDBUF=65535 a nécessité de conserver snd_buf/snd_buf_max en
+32 bits dans lwIP : la capacité interne native de 66640 dépasse 0xFFFF.
+
+Le chemin netconn a également dû conserver tcp_sndbuf() en 32 bits tout
+en continuant à appeler tcp_write() par morceaux de taille u16.
 
 ## TCP SO_RCVBUF / SO_RXDATA
 
@@ -624,10 +652,7 @@ Avec `dns=system`, les hooks DNS restent volontairement désactivés.
 
 ### Compatibilité ABI
 
-- écart exact SNDBUF=4096 ;
 - UDP SO_RXDATA : ajouter les 16 octets/datagramme visibles ;
-- gethostbyaddr ;
-- DNS async / variantes restantes ;
 - état/options NSSL lors de la promotion.
 
 ### Robustesse réseau
