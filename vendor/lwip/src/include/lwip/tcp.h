@@ -331,8 +331,18 @@ struct tcp_pcb {
   tcpwnd_size_t snd_wnd;   /* sender window */
   tcpwnd_size_t snd_wnd_max; /* the maximum sender window announced by the remote host */
 
-  tcpwnd_size_t snd_buf;   /* Available buffer space for sending (in bytes). */
-  tcpwnd_size_t snd_buf_max; /* Per-PCB maximum send-buffer space. */
+  /*
+   * Wii U nsysnet SO_SNDBUF uses an internal send capacity which may
+   * exceed 65535 even though the visible ABI value is capped at 65535.
+   *
+   * Example measured on hardware:
+   *   SO_SNDBUF=65535 -> effective capacity 66640.
+   *
+   * Keep receive/window accounting on tcpwnd_size_t, but make the
+   * send-buffer counters explicitly 32-bit.
+   */
+  u32_t snd_buf;       /* Available send-buffer space in bytes. */
+  u32_t snd_buf_max;   /* Per-PCB maximum send-buffer space. */
 #define TCP_SNDQUEUELEN_OVERFLOW (0xffffU-3)
   u16_t snd_queuelen; /* Number of pbufs currently in the send buffer. */
 
@@ -440,7 +450,7 @@ void             tcp_poll    (struct tcp_pcb *pcb, tcp_poll_fn poll, u8_t interv
 #define          tcp_mss(pcb)             ((pcb)->mss)
 #endif /* LWIP_TCP_TIMESTAMPS */
 /** @ingroup tcp_raw */
-#define          tcp_sndbuf(pcb)          (TCPWND16((pcb)->snd_buf))
+#define          tcp_sndbuf(pcb)          ((pcb)->snd_buf)
 #define          tcp_sndbuf_max(pcb)      ((pcb)->snd_buf_max)
 #define          tcp_txdata(pcb)          ((u32_t)((pcb)->snd_lbb - (pcb)->lastack))
 #define          tcp_sndlowat(pcb)        ((tcpwnd_size_t)LWIP_MIN(                                               (tcpwnd_size_t)TCP_SNDLOWAT,                                               ((pcb)->snd_buf_max > 1 ?                                                (pcb)->snd_buf_max / 2 : 0)))

@@ -1319,9 +1319,15 @@ tcp_receive(struct tcp_pcb *pcb)
       }
 #endif /* LWIP_IPV6 && LWIP_ND6_TCP_REACHABILITY_HINTS*/
 
-      TCP_WND_INC(pcb->snd_buf, recv_acked);
-      if (pcb->snd_buf > pcb->snd_buf_max) {
+      /*
+       * snd_buf is intentionally wider than tcpwnd_size_t for Wii U
+       * SO_SNDBUF compatibility. Do not use TCP_WND_INC here: that macro
+       * belongs to advertised TCP-window accounting and may be 16-bit.
+       */
+      if (recv_acked >= pcb->snd_buf_max - pcb->snd_buf) {
         pcb->snd_buf = pcb->snd_buf_max;
+      } else {
+        pcb->snd_buf += recv_acked;
       }
       /* check if this ACK ends our retransmission of in-flight data */
       if (pcb->flags & TF_RTO) {

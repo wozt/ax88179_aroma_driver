@@ -3573,35 +3573,45 @@ lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_
               (sock->conn->pcb.tcp->state != LISTEN)) {
             struct tcp_pcb *pcb = sock->conn->pcb.tcp;
             u32_t effective;
-            tcpwnd_size_t used;
+            u32_t used;
 
             if (requested == 0) {
               effective = 0;
             } else {
               /*
-               * Native Wii U measurements show allocation granularity close
-               * to one Ethernet TCP MSS. Keep the user-visible value exact,
-               * but use segment-sized backing capacity internally.
+               * Native Wii U hardware characterization with a 0x40-aligned
+               * single-send probe shows a fixed 1360-byte backing quantum:
+               *
+               *      1 ->  1360
+               *   4096 ->  5440
+               *   8192 ->  9520
+               *  16384 -> 17680
+               *  65535 -> 66640
+               *
+               * Thus:
+               *
+               *   effective = ceil(requested / 1360) * 1360
+               *
+               * The title-visible SO_SNDBUF value remains the exact value
+               * requested. Only the backing TCP send capacity is rounded.
                */
-              effective =
-                (((u32_t)requested + (u32_t)TCP_MSS - 1U) /
-                 (u32_t)TCP_MSS) * (u32_t)TCP_MSS;
+              const u32_t native_quantum = 1360U;
 
-              if (effective > 0xFFFFU) {
-                effective = 0xFFFFU;
-              }
+              effective =
+                (((u32_t)requested + native_quantum - 1U) /
+                 native_quantum) * native_quantum;
             }
 
             used = (pcb->snd_buf_max >= pcb->snd_buf)
-                     ? (tcpwnd_size_t)(pcb->snd_buf_max - pcb->snd_buf)
+                     ? (pcb->snd_buf_max - pcb->snd_buf)
                      : pcb->snd_buf_max;
 
-            pcb->snd_buf_max = (tcpwnd_size_t)effective;
+            pcb->snd_buf_max = effective;
 
             pcb->snd_buf =
               (used >= pcb->snd_buf_max)
                 ? 0
-                : (tcpwnd_size_t)(pcb->snd_buf_max - used);
+                : (pcb->snd_buf_max - used);
           }
           break;
         }
