@@ -470,7 +470,16 @@ static void run_pressure(const char *name, int set_buf, int requested)
 /* ------------------------------------------------------------------ */
 /* Deterministic single-call SNDBUF characterization                  */
 
-static uint8_t single_buf[65535];
+/*
+ * Keep both address and length 0x40-aligned so native nsysnet send()
+ * can pass the payload as one IOSVec instead of splitting it into
+ * before/middle/after vectors.
+ *
+ * 128 KiB is deliberately larger than every SNDBUF value tested so the
+ * return value exposes the actual amount accepted by one send().
+ */
+static uint8_t single_buf[128 * 1024]
+    __attribute__((aligned(0x40)));
 
 static void run_single_shot(
     const char *name,
@@ -659,6 +668,12 @@ int main(void)
 
     if (running) {
         probe_say("--- TCP SNDBUF SINGLE SHOT ---");
+
+        probe_say(
+            "SINGLE-BUF addr=%08x mod40=%u size=%u",
+            (unsigned)(uintptr_t)single_buf,
+            (unsigned)((uintptr_t)single_buf & 0x3f),
+            (unsigned)sizeof(single_buf));
 
         run_single_shot("ONE-1", 1);
         run_single_shot("ONE-4096", 4096);
