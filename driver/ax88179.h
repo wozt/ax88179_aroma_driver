@@ -35,6 +35,16 @@ Ax88179 *ax88179_open(char *why, unsigned why_size);
 void     ax88179_close(Ax88179 *ax);
 
 /*
+ * APPLICATION_ENDS path.
+ *
+ * /dev/uhs handles belong to the outgoing title process. At this late
+ * lifecycle point do not issue UHS CANCEL/DISABLE/RELEASE/CLOSE requests:
+ * forget the userspace bookkeeping and let process teardown reclaim IOSU
+ * resources. The next title opens a completely fresh UHS client.
+ */
+void     ax88179_abandon_title(Ax88179 *ax);
+
+/*
  * A physical USB unplug/replug resets the adapter even though this Aroma
  * session has already opened it before. Force the next open through the
  * complete cold PHY initialization/autonegotiation path.

@@ -15,7 +15,7 @@ void ax_net_stop(void);
  * APPLICATION_ENDS path: terminate tcpip_thread and abandon the outgoing
  * title's lwIP state. ax_net_forget() fully resets it in the next title.
  */
-void ax_net_abandon_title(void);
+int ax_net_abandon_title(void);
 
 /* Call once per title, before ax_net_start: the previous title's tcpip
  * thread died with its process and none of that state may be reused. */

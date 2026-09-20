@@ -482,24 +482,27 @@ void ax_net_stop(void)
     active = 0;
 }
 
-void ax_net_abandon_title(void)
+int ax_net_abandon_title(void)
 {
     /*
-     * tcpip_thread used to be detached and infinite. That left an active
-     * Cafe OS thread behind when the title reached real___PPCExit().
+     * tcpip_thread belongs to the outgoing application process.
      *
-     * Wake it through its mailbox and let it return with the core lock
-     * released.
+     * Terminate it, but do not walk DHCP/PCB/netif teardown here:
+     * APPLICATION_ENDS is already running from __PPCExit.
      */
+    int shutdown_result = 0;
+
     if (initialized)
-        tcpip_shutdown();
+        shutdown_result = tcpip_shutdown();
 
     /*
-     * Do not walk DHCP/PCB/netif state during __PPCExit. The next title's
-     * ax_net_forget() resets every lwIP global before tcpip_init() runs.
+     * The next title calls ax_net_forget() before constructing a fresh
+     * lwIP instance.
      */
     active = 0;
     initialized = 0;
     netif_in_list = 0;
     address[0] = 0;
+
+    return shutdown_result;
 }

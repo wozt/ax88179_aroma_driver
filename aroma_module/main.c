@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.36-clean-thread-exit");
+WUMS_MODULE_VERSION("0.2.37-abandon-title-uhs");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -515,32 +515,50 @@ static int run_network(int argc, const char **argv)
             &title_ending,
             memory_order_acquire);
 
+    OSReport("[AXEXIT] worker cleanup begin ending=%d\n",
+             ending_title);
+
 #if !AX_DISABLE_SHIM
     nsysnet_shim_stop_accepting();
 
     /*
-     * On a normal runtime stop, close lwIP sockets cleanly.
+     * During an ordinary runtime stop, close lwIP-owned sockets.
      *
-     * On APPLICATION_ENDS the title has already completed its own
-     * NSSL/socket cleanup. Do not run another socket teardown pass from
-     * inside __PPCExit: the next title resets lwIP from scratch anyway.
+     * During APPLICATION_ENDS the title has already performed its socket
+     * and NSSL cleanup, so do not touch those PCBs again.
      */
     if (!ending_title)
         nsysnet_shim_drain_owned_sockets();
 #endif
 
-    if (ending_title)
-        ax_net_abandon_title();
-    else
+    OSReport("[AXEXIT] shim quiesced\n");
+
+    if (ending_title) {
+        int tcpip_rc =
+            ax_net_abandon_title();
+
+        OSReport("[AXEXIT] tcpip shutdown rc=%d\n",
+                 tcpip_rc);
+    } else {
         ax_net_stop();
+    }
+
     ax_mark(AX_MARK_NET_STOP);
 
     if (ax) {
-        ax88179_close(ax);
+        if (ending_title) {
+            OSReport("[AXEXIT] abandon UHS userspace handle\n");
+            ax88179_abandon_title(ax);
+        } else {
+            ax88179_close(ax);
+        }
+
         ax = NULL;
     }
 
     ax_mark(AX_MARK_ADAPTER_CLOSED);
+
+    OSReport("[AXEXIT] worker cleanup complete\n");
 
 cleanup:
     AX_LOG("stopped");
@@ -575,17 +593,23 @@ static void end_title_clean(void)
     AX_LOG("APPLICATION_ENDS title=%016llx clean-stop",
            (unsigned long long)OSGetTitleID());
 
+    OSReport("[AXEXIT] APPLICATION_ENDS entered\n");
+
     atomic_store_explicit(
         &title_ending,
         true,
         memory_order_release);
 
-    nsysnet_shim_quiesce();
-
+    /*
+     * Do not touch the shim from the __PPCExit thread. Simply wake the
+     * worker; it owns the actual teardown.
+     */
     atomic_store_explicit(
         &stopping,
         true,
         memory_order_release);
+
+    OSReport("[AXEXIT] worker stop signalled\n");
 
     /*
      * AX RX waits are bounded to 5 ms. The worker's title-exit path then
@@ -599,8 +623,13 @@ static void end_title_clean(void)
             OSMillisecondsToTicks(5));
     }
 
-    if (OSIsThreadTerminated(&worker))
+    OSReport("[AXEXIT] worker terminated=%d\n",
+             OSIsThreadTerminated(&worker) ? 1 : 0);
+
+    if (OSIsThreadTerminated(&worker)) {
         OSJoinThread(&worker, NULL);
+        OSReport("[AXEXIT] worker joined\n");
+    }
 
     /*
      * Watchdog checks 'stopping' every 100 ms.
@@ -614,13 +643,20 @@ static void end_title_clean(void)
                 OSMillisecondsToTicks(10));
         }
 
-        if (OSIsThreadTerminated(&watchdog))
+        OSReport("[AXEXIT] watchdog terminated=%d\n",
+                 OSIsThreadTerminated(&watchdog) ? 1 : 0);
+
+        if (OSIsThreadTerminated(&watchdog)) {
             OSJoinThread(&watchdog, NULL);
+            OSReport("[AXEXIT] watchdog joined\n");
+        }
 
         watchdog_started = 0;
     }
 
     started = 0;
+
+    OSReport("[AXEXIT] APPLICATION_ENDS returning\n");
 }
 
 

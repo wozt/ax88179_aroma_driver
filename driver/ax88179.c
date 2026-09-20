@@ -769,6 +769,32 @@ void ax88179_close(Ax88179 *ax)
     g_open = 0;
 }
 
+void ax88179_abandon_title(Ax88179 *ax)
+{
+    if (!ax)
+        return;
+
+    /*
+     * No UHS call here.
+     *
+     * We are already inside the outgoing title's __PPCExit path. IOSU owns
+     * the kernel-side lifetime of this process' /dev/uhs client and will
+     * reclaim it when the process disappears.
+     *
+     * Calling UhsAdministerEndpoint/UhsReleaseInterface/UhsClientClose here
+     * is unsafe because that teardown may already be in progress.
+     */
+    ax->rx_async_started = 0;
+
+    free(ax);
+
+    /*
+     * This flag is module-resident, so reset it explicitly for the next
+     * title. The next ax88179_open() will create a brand-new UHS client.
+     */
+    g_open = 0;
+}
+
 const uint8_t *ax88179_mac(const Ax88179 *ax)
 {
     return ax ? ax->mac : NULL;
