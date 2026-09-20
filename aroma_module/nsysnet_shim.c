@@ -4748,50 +4748,10 @@ int nsysnet_shim_install(void)
     SHIM_TRACE(2, "FunctionPatcher v%u", version);
 
     /*
-     * Diagnostic only: trace WUT socket teardown for Wii U Menu.
-     * One process only, therefore this adds exactly one patch handle.
+     * 0.2.46 diagnostic:
+     * lifecycle tracing FunctionPatcher hooks intentionally disabled.
+     * Keep only the normal nsysnet socket hook group for this test.
      */
-    SHIM_PATCH_PROCESS(
-        socket_lib_finish,
-        FP_TARGET_PROCESS_WII_U_MENU);
-
-    /*
-     * Diagnose WUT socket finalisation:
-     *
-     *   ACClose()
-     *   ACFinalize()
-     *   socket devoptab removal
-     *   socket_lib_finish()
-     */
-    {
-        function_replacement_data_t d =
-            REPLACE_FUNCTION_FOR_PROCESS(
-                ACClose,
-                LIBRARY_NN_AC,
-                ACClose,
-                FP_TARGET_PROCESS_WII_U_MENU);
-
-        if (add_patch(
-                &d,
-                "ACClose",
-                FP_TARGET_PROCESS_WII_U_MENU) < 0)
-            goto fail;
-    }
-
-    {
-        function_replacement_data_t d =
-            REPLACE_FUNCTION_FOR_PROCESS(
-                ACFinalize,
-                LIBRARY_NN_AC,
-                ACFinalize,
-                FP_TARGET_PROCESS_WII_U_MENU);
-
-        if (add_patch(
-                &d,
-                "ACFinalize",
-                FP_TARGET_PROCESS_WII_U_MENU) < 0)
-            goto fail;
-    }
 
     SHIM_PATCH(socket);
     SHIM_PATCH(socketclose);
@@ -4817,12 +4777,9 @@ int nsysnet_shim_install(void)
     SHIM_PATCH(socketlasterr);
 
     /*
-     * NSSL requires a native descriptor. Promote AX-backed sockets to
-     * their reserved nsysnet placeholder at the TLS boundary.
+     * 0.2.46 diagnostic:
+     * NSSL hooks disabled to isolate the ordinary nsysnet socket hooks.
      */
-    SHIM_PATCH(NSSLCreateConnection);
-    SHIM_PATCH(NSSLDestroyConnection);
-    SHIM_PATCH(NSSLFinish);
 
     if (!atomic_load(&system_dns)) {
         SHIM_PATCH(gethostbyname);
