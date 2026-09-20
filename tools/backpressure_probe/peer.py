@@ -7,8 +7,7 @@ import time
 HOST = "192.168.2.100"
 PORT = 19040
 STALL_SECONDS = 2.0
-TESTS = 7
-
+TESTS = 5
 listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 

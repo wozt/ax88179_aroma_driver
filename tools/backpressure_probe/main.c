@@ -466,6 +466,183 @@ static void run_pressure(const char *name, int set_buf, int requested)
     close(fd);
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Deterministic single-call SNDBUF characterization                  */
+
+static uint8_t single_buf[65535];
+
+static void run_single_shot(
+    const char *name,
+    int requested)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (fd < 0) {
+        probe_say("%s socket FAIL errno=%d", name, errno);
+        return;
+    }
+
+    errno = 0;
+
+    int rc = setsockopt(
+        fd,
+        SOL_SOCKET,
+        SO_SNDBUF,
+        &requested,
+        sizeof(requested));
+
+    int set_errno = errno;
+    int set_nerr =
+        rc < 0 ? RPLWRAP(socketlasterr)() : 0;
+
+    if (rc != 0) {
+        probe_say(
+            "%s set SNDBUF=%d rc=%d errno=%d nerr=%d",
+            name,
+            requested,
+            rc,
+            set_errno,
+            set_nerr);
+
+        close(fd);
+        return;
+    }
+
+    int visible = -1;
+
+    if (get_int_opt(fd, SO_SNDBUF, &visible) != 0) {
+        probe_say(
+            "%s get SNDBUF FAIL errno=%d",
+            name,
+            errno);
+
+        close(fd);
+        return;
+    }
+
+    if (connect_peer(fd) != 0) {
+        probe_say(
+            "%s connect FAIL errno=%d nerr=%d",
+            name,
+            errno,
+            RPLWRAP(socketlasterr)());
+
+        close(fd);
+        return;
+    }
+
+    /*
+     * Do not log/pump between connect and the two send() calls.
+     * We want the least disturbed view possible of the native send queue.
+     */
+    for (unsigned i = 0; i < sizeof(single_buf); ++i)
+        single_buf[i] = (uint8_t)(i * 31u + requested);
+
+    errno = 0;
+
+    int first = send(
+        fd,
+        single_buf,
+        sizeof(single_buf),
+        0);
+
+    int first_errno = errno;
+    int first_nerr =
+        first < 0 ? RPLWRAP(socketlasterr)() : 0;
+
+    int tx1 = -1;
+    int tx1_rc =
+        get_int_opt(fd, SO_TXDATA, &tx1);
+
+    errno = 0;
+
+    int second = send(
+        fd,
+        single_buf,
+        sizeof(single_buf),
+        0);
+
+    int second_errno = errno;
+    int second_nerr =
+        second < 0 ? RPLWRAP(socketlasterr)() : 0;
+
+    int tx2 = -1;
+    int tx2_rc =
+        get_int_opt(fd, SO_TXDATA, &tx2);
+
+    probe_say(
+        "%s visible=%d first=%d err=%d nerr=%d TX1=%d/%d",
+        name,
+        visible,
+        first,
+        first_errno,
+        first_nerr,
+        tx1_rc,
+        tx1);
+
+    probe_say(
+        "%s second=%d err=%d nerr=%d TX2=%d/%d",
+        name,
+        second,
+        second_errno,
+        second_nerr,
+        tx2_rc,
+        tx2);
+
+    shutdown(fd, SHUT_WR);
+
+    char reply[96];
+    size_t used = 0;
+
+    OSTime deadline =
+        OSGetTime() +
+        OSMillisecondsToTicks(10000);
+
+    while (used + 1 < sizeof(reply) &&
+           pump() &&
+           OSGetTime() < deadline) {
+
+        errno = 0;
+
+        int n = recv(
+            fd,
+            reply + used,
+            sizeof(reply) - used - 1,
+            0);
+
+        if (n > 0) {
+            used += (size_t)n;
+            reply[used] = 0;
+
+            if (strchr(reply, '\n'))
+                break;
+
+            continue;
+        }
+
+        if (n == 0)
+            break;
+
+        if (would_block()) {
+            OSSleepTicks(
+                OSMillisecondsToTicks(2));
+            continue;
+        }
+
+        break;
+    }
+
+    reply[used] = 0;
+
+    probe_say(
+        "%s peer='%s'",
+        name,
+        reply);
+
+    close(fd);
+}
+
 int main(void)
 {
     if (probe_init("AX TCP Backpressure Probe") != 0)
@@ -480,19 +657,14 @@ int main(void)
 
     show_path();
 
-    negative_matrix("SNDBUF", SO_SNDBUF);
-    negative_matrix("RCVBUF", SO_RCVBUF);
-
     if (running) {
-        probe_say("--- TCP send backpressure ---");
+        probe_say("--- TCP SNDBUF SINGLE SHOT ---");
 
-        run_pressure("DEFAULT", 0, 0);
-        run_pressure("SNDBUF-0", 1, 0);
-        run_pressure("SNDBUF-1", 1, 1);
-        run_pressure("SNDBUF-4096", 1, 4096);
-        run_pressure("SNDBUF-8192", 1, 8192);
-        run_pressure("SNDBUF-16384", 1, 16384);
-        run_pressure("SNDBUF-65535", 1, 65535);
+        run_single_shot("ONE-1", 1);
+        run_single_shot("ONE-4096", 4096);
+        run_single_shot("ONE-8192", 8192);
+        run_single_shot("ONE-16384", 16384);
+        run_single_shot("ONE-65535", 65535);
     }
 
     probe_say("--- END BACKPRESSURE PROBE ---");
