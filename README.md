@@ -69,12 +69,11 @@ The project provides:
 ### 🚧 Still in development
 
 * Browser networking
-* HOME Menu / eShop / Download Manager dedicated process coverage
+* eShop / Download Manager dedicated process coverage
 * Root/system process support
 * Higher-level Wii U network-state emulation
 * Wi-Fi-free system operation
 * DHCP renew/rebind validation
-* Wider game compatibility
 
 ---
 
