@@ -4771,12 +4771,14 @@ int nsysnet_shim_install(void)
      * 2 functions x GAME + Wii U Menu = 4 handles.
      */
     /*
-     * 0.2.55 bisection:
-     * socket hook on GAME only.
+     * 0.2.56:
+     * One FunctionPatcher registration covers both GAME and Wii U Menu.
+     * Do not register the same replacement twice with two target processes:
+     * both registrations share real_socket.
      */
     SHIM_PATCH_PROCESS(
         socket,
-        FP_TARGET_PROCESS_GAME);
+        FP_TARGET_PROCESS_GAME_AND_MENU);
 
     /*
      * 0.2.46 diagnostic:
