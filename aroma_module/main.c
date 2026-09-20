@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.37-abandon-title-uhs");
+WUMS_MODULE_VERSION("0.2.38-all-ends-done");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -579,85 +579,93 @@ static void note_exit_requested(void)
 }
 
 /*
- * APPLICATION_ENDS runs from Aroma's __PPCExit hook.
+ * Our own APPLICATION_ENDS is too early for destructive cleanup:
+ * Aroma still has to call APPLICATION_ENDS for every module after us.
  *
- * Unlike the old implementation, every thread we create now has a real
- * cooperative shutdown path. tcpip_thread is explicitly woken through its
- * mailbox and the watchdog checks 'stopping' every 100 ms.
+ * Keep AX/lwIP/NSSL alive until ALL_APPLICATION_ENDS_DONE.
  */
-static void end_title_clean(void)
+static void note_application_ends(void)
 {
     if (!started)
         return;
 
-    AX_LOG("APPLICATION_ENDS title=%016llx clean-stop",
+    AX_LOG("APPLICATION_ENDS title=%016llx defer-cleanup",
            (unsigned long long)OSGetTitleID());
+}
 
-    OSReport("[AXEXIT] APPLICATION_ENDS entered\n");
+/*
+ * Aroma __PPCExit order:
+ *
+ *   APPLICATION_ENDS (all modules)
+ *   ALL_APPLICATION_ENDS_DONE
+ *   FINI_WUT_SOCKETS
+ *   FINI_WUT_DEVOPTAB
+ *   real___PPCExit
+ *
+ * Therefore this is the correct point to stop our per-title resources:
+ * every other module has already run its APPLICATION_ENDS, while WUT
+ * sockets and devoptab still exist.
+ */
+static void stop_after_all_application_ends(void)
+{
+    if (!started)
+        return;
+
+    AX_LOG("ALL_APPLICATION_ENDS_DONE title=%016llx stopping",
+           (unsigned long long)OSGetTitleID());
 
     atomic_store_explicit(
         &title_ending,
         true,
         memory_order_release);
 
-    /*
-     * Do not touch the shim from the __PPCExit thread. Simply wake the
-     * worker; it owns the actual teardown.
-     */
     atomic_store_explicit(
         &stopping,
         true,
         memory_order_release);
 
-    OSReport("[AXEXIT] worker stop signalled\n");
-
     /*
-     * AX RX waits are bounded to 5 ms. The worker's title-exit path then
-     * wakes/stops tcpip_thread and cancels UHS RX.
+     * Relay shutdown can consume up to roughly 500 ms and tcpip shutdown
+     * another ~100 ms. Give the worker a comfortable ceiling here.
      */
     for (int i = 0;
-         i < 100 &&
+         i < 200 &&
          !OSIsThreadTerminated(&worker);
          ++i) {
-        OSSleepTicks(
-            OSMillisecondsToTicks(5));
-    }
 
-    OSReport("[AXEXIT] worker terminated=%d\n",
-             OSIsThreadTerminated(&worker) ? 1 : 0);
+        OSSleepTicks(
+            OSMillisecondsToTicks(10));
+    }
 
     if (OSIsThreadTerminated(&worker)) {
         OSJoinThread(&worker, NULL);
-        OSReport("[AXEXIT] worker joined\n");
+    } else {
+        AX_LOG("ALL_APPLICATION_ENDS_DONE worker still alive");
     }
 
     /*
-     * Watchdog checks 'stopping' every 100 ms.
+     * The watchdog is cooperative since 0.2.36 and checks stopping every
+     * 100 ms.
      */
     if (watchdog_started) {
         for (int i = 0;
-             i < 20 &&
+             i < 50 &&
              !OSIsThreadTerminated(&watchdog);
              ++i) {
+
             OSSleepTicks(
                 OSMillisecondsToTicks(10));
         }
 
-        OSReport("[AXEXIT] watchdog terminated=%d\n",
-                 OSIsThreadTerminated(&watchdog) ? 1 : 0);
-
-        if (OSIsThreadTerminated(&watchdog)) {
+        if (OSIsThreadTerminated(&watchdog))
             OSJoinThread(&watchdog, NULL);
-            OSReport("[AXEXIT] watchdog joined\n");
-        }
 
         watchdog_started = 0;
     }
 
     started = 0;
-
-    OSReport("[AXEXIT] APPLICATION_ENDS returning\n");
 }
+
 
 
 /*
@@ -763,7 +771,8 @@ WUMS_APPLICATION_STARTS()
 }
 
 WUMS_APPLICATION_REQUESTS_EXIT() { note_exit_requested(); }
-WUMS_APPLICATION_ENDS() { end_title_clean(); }
+WUMS_APPLICATION_ENDS() { note_application_ends(); }
+WUMS_ALL_APPLICATION_ENDS_DONE() { stop_after_all_application_ends(); }
 WUMS_DEINITIALIZE() { stop_worker(); }
 
 /* Runtime entry points used by shim_probe through OSDynLoad. */
