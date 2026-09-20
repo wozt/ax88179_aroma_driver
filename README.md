@@ -7,14 +7,17 @@ The project provides:
 * a native user-mode AX88179 USB driver;
 * a dedicated lwIP TCP/IP stack;
 * an Aroma `nsysnet.rpl` compatibility shim;
-* Nintendo NSSL/TLS transport through the AX88179.
+* Nintendo NSSL/TLS transport through the AX88179;
+* transparent GAME + Wii U Menu process coverage through FunctionPatcher.
 
 > [!IMPORTANT]
 > This project is still experimental.
 >
-> Networking for Wii U games and homebrew running as the **GAME process** is already functional and has been validated with real online games.
+> Networking for Wii U games/homebrew and the **Wii U Menu process** is functional on real hardware.
 >
-> It is **not yet a complete system-wide Ethernet replacement**. Wii U system applications such as the Menu, Browser and eShop are the next major integration target.
+> The current implementation survives repeated Menu -> game -> Menu transitions with AX routing, AX DNS, Nintendo NSSL bridging and FTP handoff enabled.
+>
+> It is **not yet a complete system-wide Ethernet replacement**. Browser, HOME Menu/eShop-related processes, root/system processes and higher-level network-state APIs still need dedicated coverage.
 
 ---
 
@@ -45,6 +48,9 @@ The project provides:
 * Asynchronous DNS
 * Reverse IPv4 DNS
 * Nintendo NSSL/TLS over AX88179
+* Wii U Menu + GAME FunctionPatcher coverage
+* Repeated Menu/game title transitions
+* FTPiiU native-listener handoff to AX
 * USB hot-unplug/replug recovery
 * Ethernet link loss/recovery
 * DHCP recovery after interface recreation
@@ -56,13 +62,15 @@ The project provides:
 * Super Mario Maker + Pretendo
 * Super Smash Bros. for Wii U + Pretendo
 * Real Smash matchmaking and complete online match
+* Repeated Menu -> Mario Maker -> Menu -> Mario Maker transitions
+* Game download/play workflow followed by a clean return to the Menu
 
 ### 🚧 Still in development
 
-* Wii U Menu networking
 * Browser networking
-* HOME Menu / eShop / Download Manager networking
+* HOME Menu / eShop / Download Manager dedicated process coverage
 * Root/system process support
+* Higher-level Wii U network-state emulation
 * Wi-Fi-free system operation
 * DHCP renew/rebind validation
 * Wider game compatibility
@@ -87,7 +95,7 @@ Other ASIX USB Ethernet controllers should not be assumed compatible unless expl
 ### Normal sockets
 
 ```text
-Wii U game / homebrew
+Wii U Menu / game / homebrew
         |
         | nsysnet API
         v
@@ -113,15 +121,60 @@ Wii U game / homebrew
       USB Ethernet
 ```
 
-The shim currently targets:
+The shim targets both title process classes with a **single FunctionPatcher registration per export**:
 
 ```text
-FP_TARGET_PROCESS_GAME
+FP_TARGET_PROCESS_GAME_AND_MENU
 ```
 
 Only sockets created by the shim are routed through AX/lwIP.
 
 Existing native sockets remain native.
+
+### Why GAME_AND_MENU must be one registration
+
+FunctionPatcher's `DECL_FUNCTION(name, ...)` model provides one shared `real_name` pointer for a replacement function.
+
+Registering the same replacement twice like this:
+
+```text
+FP_TARGET_PROCESS_GAME
+FP_TARGET_PROCESS_WII_U_MENU
+```
+
+creates two patch objects that both use the same `real_name` storage.
+
+Each patch generates its own trampoline and updates that shared `real_name` pointer.
+
+On hardware this caused Menu -> game transitions to hang, even when all networking was configured to use the native Wii U stack.
+
+Using:
+
+```text
+FP_TARGET_PROCESS_GAME_AND_MENU
+```
+
+creates a single FunctionPatcher registration with one trampoline capable of handling both process classes.
+
+This is now the required implementation.
+
+With the full AX configuration:
+
+```text
+22 socket exports
+ 3 NSSL exports
+11 DNS exports
+----------------
+36 FunctionPatcher handles
+```
+
+With:
+
+```ini
+dns=system
+```
+
+only 25 handles are installed.
 
 ---
 
@@ -132,7 +185,7 @@ Nintendo NSSL cannot directly consume a private lwIP descriptor.
 The project solves this without replacing Nintendo's TLS stack.
 
 ```text
-Game
+Title
  |
  v
 Nintendo NSSL / IOS-NSEC
@@ -263,7 +316,7 @@ Configuration file:
 SD:/wiiu/ax88179/config.ini
 ```
 
-Recommended development configuration:
+Current full AX configuration:
 
 ```ini
 [dhcp]
@@ -276,6 +329,7 @@ shim_trace=0
 dns=ax
 route=ax
 nssl=bridge
+ftp_handoff=on
 ```
 
 ### DHCP
@@ -291,8 +345,6 @@ Available modes:
 
 A full console reboot clears the cached session configuration.
 
----
-
 ### Route selection
 
 ```ini
@@ -301,10 +353,8 @@ route=ax
 
 Values:
 
-* `ax` — route compatible GAME-process sockets through lwIP/AX88179.
+* `ax` — route compatible Wii U Menu and GAME-process sockets through lwIP/AX88179.
 * `native` — diagnostic mode using the original Wii U network stack.
-
----
 
 ### DNS
 
@@ -321,8 +371,6 @@ AX mode supports the DNS APIs currently required by the tested titles, including
 
 The current Pretendo hostname rewrite logic is development-oriented and does not yet provide a generic replacement for every possible custom Inkay configuration.
 
----
-
 ### NSSL
 
 ```ini
@@ -332,9 +380,35 @@ nssl=bridge
 Values:
 
 * `bridge` — Nintendo NSSL uses the localhost relay and communicates with the Internet through AX/lwIP.
-* `native` — legacy fallback using the original native network path.
+* `native` — fallback using the original native network path.
 
----
+The shim covers:
+
+```text
+NSSLCreateConnection
+NSSLDestroyConnection
+NSSLFinish
+```
+
+### FTP handoff
+
+```ini
+ftp_handoff=on
+```
+
+FTPiiU may already own a native/Wi-Fi TCP listener on port 21 before the AX shim becomes active.
+
+When enabled, the module asks the existing listener to follow its normal network-loss/recreate path. The new listener is then created through the AX shim.
+
+This has been validated together with normal Menu -> game transitions.
+
+Set:
+
+```ini
+ftp_handoff=off
+```
+
+to keep the existing native listener during diagnostics.
 
 ### Debugging
 
@@ -411,12 +485,6 @@ get_h_errno
 gai_strerror
 ```
 
-Nintendo NSSL integration is handled through:
-
-```text
-NSSLCreateConnection
-```
-
 ---
 
 ## Native descriptor compatibility
@@ -465,7 +533,7 @@ effective = ceil(SO_SNDBUF / 1360) * 1360
 |       16384 |           17680 |       17680 |
 |       65535 |           66640 |       66640 |
 
-AX now reproduces the native backpressure behavior exactly for these measured cases.
+AX reproduces the native backpressure behavior for these measured cases.
 
 ---
 
@@ -481,7 +549,7 @@ Example:
 
 ```text
 46 datagrams × 1400 payload bytes = 64400
-46 datagrams ×   16 metadata bytes = 736
+46 datagrams ×   16 metadata bytes =   736
 
 SO_RXDATA = 65136
 ```
@@ -565,13 +633,12 @@ A real lease-expiration renew/rebind sequence remains to be tested.
 
 ## Title lifecycle
 
-The AX worker is recreated across title transitions.
+The AX worker is recreated cleanly across title transitions.
 
-Typical startup guards:
+Current startup guard:
 
 ```text
-first Aroma worker : ~25 s
-later workers      : ~2 s
+per title : ~2 s
 ```
 
 Typical hardware timings:
@@ -584,9 +651,29 @@ warm open : ~250 ms
 warm link : ~13-15 ms
 ```
 
-Warm reopen is used when the existing PHY state is still valid.
+On `WUMS_ALL_APPLICATION_ENDS_DONE`, the module stops the per-title worker, retires the lwIP state and abandons the title-owned AX/UHS state before WUT socket/devoptab finalization continues.
 
-Otherwise the driver falls back to a cold reset and autonegotiation.
+The normal WUT devoptab teardown is enabled.
+
+Validated transition sequence:
+
+```text
+Wii U Menu
+  -> Super Mario Maker
+  -> Wii U Menu
+  -> Super Mario Maker
+  -> game download + play
+  -> Wii U Menu
+```
+
+This sequence was completed with:
+
+```ini
+dns=ax
+route=ax
+nssl=bridge
+ftp_handoff=on
+```
 
 ---
 
@@ -610,6 +697,7 @@ Validated:
 * NSSL through AX88179
 * level download
 * gameplay
+* repeated Menu -> game -> Menu transitions
 
 ### Super Smash Bros. for Wii U
 
@@ -626,12 +714,22 @@ Validated:
 
 ## Current limitations
 
-The project currently redirects only the GAME process.
-
-The following are not yet fully routed through AX88179:
+The shim currently covers:
 
 ```text
 Wii U Menu
+GAME
+```
+
+through:
+
+```text
+FP_TARGET_PROCESS_GAME_AND_MENU
+```
+
+The following are not yet dedicated AX targets:
+
+```text
 Browser
 HOME Menu
 eShop
@@ -640,9 +738,11 @@ root process
 other system services
 ```
 
-Higher-level Wii U network-state APIs also still report the original system networking state.
+Some user workflows involving downloads have succeeded, but that does not yet prove dedicated AX routing for every system process participating in those workflows.
 
-The final system-wide implementation will need to expose the AX state as something equivalent to:
+Higher-level Wii U network-state APIs can also still report the original system networking state.
+
+A complete system-wide implementation will eventually need to expose the AX state as something equivalent to:
 
 ```text
 link    = UP
@@ -655,11 +755,7 @@ DNS     = AX DHCP DNS
 
 ## Roadmap
 
-### 1. Finish RX performance
-
-- [x] Full UDP RX burst capacity at ~147 Mbit/s payload is done
-
-### 2. Validate DHCP renew/rebind
+### 1. Validate DHCP renew/rebind
 
 Test a genuine lease lifecycle:
 
@@ -669,23 +765,27 @@ BOUND
   -> REBINDING
 ```
 
-### 3. Expand process coverage
+### 2. Expand process coverage
 
-Planned order:
+Current:
 
 ```text
-GAME
-  -> Wii U Menu
-  -> Browser
-  -> HOME Menu / eShop / Download Manager
-  -> root/system processes
+GAME + Wii U Menu
 ```
 
-### 4. Replace system network state
+Next targets:
+
+```text
+Browser
+HOME Menu / eShop / Download Manager
+root/system processes
+```
+
+### 3. Replace system network state
 
 Make the rest of the Wii U recognize the AX interface as its active network connection.
 
-### 5. Remove the Wi-Fi dependency
+### 4. Remove the Wi-Fi dependency
 
 The long-term goal is:
 
@@ -695,7 +795,7 @@ The long-term goal is:
 
 ## Development notes
 
-Detailed reverse-engineering results and native-vs-AX measurements are maintained in:
+Detailed reverse-engineering results, FunctionPatcher lifecycle findings and native-vs-AX measurements are maintained in:
 
 [FINDINGS.md](FINDINGS.md)
 
@@ -715,4 +815,4 @@ Use it at your own risk.
 
 No project license has been selected yet.
 
-The licensing requirements of the original project code and vendored dependencies should be documented before distributing official releases or accepting external contributions.
+The licensing requirements of the project code and vendored dependencies should be documented before distributing official releases or accepting external contributions.
