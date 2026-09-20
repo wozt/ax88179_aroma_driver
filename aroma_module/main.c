@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.35-nonblocking-title-end");
+WUMS_MODULE_VERSION("0.2.36-clean-thread-exit");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 /* Initialise the WUT devoptab so stdio (fopen/fgets/...) can access
@@ -107,6 +107,12 @@ static const char *const mark_names[] = {
     "link up", "dhcp bound", "shim installed",
 };
 
+static atomic_bool stopping;
+static atomic_bool title_ending;
+static int started;
+static atomic_uint worker_generation;
+static atomic_int menu_seen;
+
 /* If an adapter was opened but DHCP has not bound 45 s after the worker
  * starts, show on the fatal screen exactly how far the bring-up got.
  * The UDP log cannot be relied on for this: until DHCP succeeds it can
@@ -114,7 +120,29 @@ static const char *const mark_names[] = {
 static int run_watchdog(int argc, const char **argv)
 {
     (void)argc; (void)argv;
-    OSSleepTicks(OSMillisecondsToTicks(45 * 1000));
+
+    /*
+     * Never sleep for 45 seconds in one uninterruptible chunk.
+     * APPLICATION_ENDS must be able to stop this thread quickly.
+     */
+    for (unsigned waited = 0;
+         waited < 45 * 1000;
+         waited += 100) {
+
+        if (atomic_load_explicit(
+                &stopping,
+                memory_order_acquire))
+            return 0;
+
+        OSSleepTicks(
+            OSMillisecondsToTicks(100));
+    }
+
+    if (atomic_load_explicit(
+            &stopping,
+            memory_order_acquire))
+        return 0;
+
     unsigned m = ax_progress_snapshot();
     if (m & (1u << AX_MARK_DHCP_BOUND)) return 0;
     /* No adapter found is not a fault: the console was booted without
@@ -137,12 +165,7 @@ static int run_watchdog(int argc, const char **argv)
     AX_LOG("STUCK %s", st);
     return 0;
 }
-static atomic_bool stopping;
-static int started;
-static atomic_uint worker_generation;
-static atomic_int menu_seen;
-
-/*
+ /*
  * Wii U Menu title IDs:
  *   JPN 0005001010040000
  *   USA 0005001010040100
@@ -487,17 +510,29 @@ static int run_network(int argc, const char **argv)
     }
 
     /* Cleanup */
+    int ending_title =
+        atomic_load_explicit(
+            &title_ending,
+            memory_order_acquire);
+
 #if !AX_DISABLE_SHIM
     nsysnet_shim_stop_accepting();
 
     /*
-     * From REQUESTS_EXIT onward the title only sees its native placeholder
-     * descriptors. Close the old lwIP backing sockets here, on our CPU2
-     * worker, before dismantling the netif.
+     * On a normal runtime stop, close lwIP sockets cleanly.
+     *
+     * On APPLICATION_ENDS the title has already completed its own
+     * NSSL/socket cleanup. Do not run another socket teardown pass from
+     * inside __PPCExit: the next title resets lwIP from scratch anyway.
      */
-    nsysnet_shim_drain_owned_sockets();
+    if (!ending_title)
+        nsysnet_shim_drain_owned_sockets();
 #endif
-    ax_net_stop();
+
+    if (ending_title)
+        ax_net_abandon_title();
+    else
+        ax_net_stop();
     ax_mark(AX_MARK_NET_STOP);
 
     if (ax) {
@@ -528,34 +563,63 @@ static void note_exit_requested(void)
 /*
  * APPLICATION_ENDS runs from Aroma's __PPCExit hook.
  *
- * At this point the title has completed its own NSSL/socket cleanup and the
- * process is about to disappear. Waiting for, or joining, one of that
- * process' threads from __PPCExit can deadlock the title transition.
- *
- * Signal our CPU2 worker and immediately return. If it gets CPU time before
- * process destruction it can perform its normal cleanup; otherwise the
- * process teardown kills it. The next title calls ax_net_forget() before
- * starting a fresh lwIP instance anyway.
+ * Unlike the old implementation, every thread we create now has a real
+ * cooperative shutdown path. tcpip_thread is explicitly woken through its
+ * mailbox and the watchdog checks 'stopping' every 100 ms.
  */
-static void end_title_nonblocking(void)
+static void end_title_clean(void)
 {
     if (!started)
         return;
 
-    AX_LOG("APPLICATION_ENDS title=%016llx signal-only",
+    AX_LOG("APPLICATION_ENDS title=%016llx clean-stop",
            (unsigned long long)OSGetTitleID());
 
+    atomic_store_explicit(
+        &title_ending,
+        true,
+        memory_order_release);
+
     nsysnet_shim_quiesce();
+
     atomic_store_explicit(
         &stopping,
         true,
         memory_order_release);
 
     /*
-     * Resident module state survives the application switch, but this
-     * OSThread belongs to the outgoing process. Do not attempt to join it
-     * from the next application.
+     * AX RX waits are bounded to 5 ms. The worker's title-exit path then
+     * wakes/stops tcpip_thread and cancels UHS RX.
      */
+    for (int i = 0;
+         i < 100 &&
+         !OSIsThreadTerminated(&worker);
+         ++i) {
+        OSSleepTicks(
+            OSMillisecondsToTicks(5));
+    }
+
+    if (OSIsThreadTerminated(&worker))
+        OSJoinThread(&worker, NULL);
+
+    /*
+     * Watchdog checks 'stopping' every 100 ms.
+     */
+    if (watchdog_started) {
+        for (int i = 0;
+             i < 20 &&
+             !OSIsThreadTerminated(&watchdog);
+             ++i) {
+            OSSleepTicks(
+                OSMillisecondsToTicks(10));
+        }
+
+        if (OSIsThreadTerminated(&watchdog))
+            OSJoinThread(&watchdog, NULL);
+
+        watchdog_started = 0;
+    }
+
     started = 0;
 }
 
@@ -629,7 +693,16 @@ WUMS_APPLICATION_STARTS()
     if (started) return;
 
     nsysnet_shim_begin_title();
-    atomic_store_explicit(&stopping, false, memory_order_release);
+
+    atomic_store_explicit(
+        &title_ending,
+        false,
+        memory_order_release);
+
+    atomic_store_explicit(
+        &stopping,
+        false,
+        memory_order_release);
     /* Core 2, not "any". Everything this module runs is background work,
      * and a thread of ours that spins must not be able to starve the
      * title's own main thread -- that is what turned a corrupted lwIP
@@ -654,7 +727,7 @@ WUMS_APPLICATION_STARTS()
 }
 
 WUMS_APPLICATION_REQUESTS_EXIT() { note_exit_requested(); }
-WUMS_APPLICATION_ENDS() { end_title_nonblocking(); }
+WUMS_APPLICATION_ENDS() { end_title_clean(); }
 WUMS_DEINITIALIZE() { stop_worker(); }
 
 /* Runtime entry points used by shim_probe through OSDynLoad. */

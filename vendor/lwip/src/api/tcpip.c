@@ -60,6 +60,14 @@ static tcpip_init_done_fn tcpip_init_done;
 static void *tcpip_init_done_arg;
 static sys_mbox_t tcpip_mbox;
 
+/*
+ * Upstream lwIP assumes tcpip_thread lasts for the whole process.
+ * Aroma switches application processes while this module remains resident,
+ * so the outgoing title needs an explicit shutdown.
+ */
+static volatile u8_t tcpip_shutdown_requested;
+static volatile u8_t tcpip_thread_running;
+
 #if LWIP_TCPIP_CORE_LOCKING
 /** The global semaphore to lock the stack. */
 sys_mutex_t lock_tcpip_core;
@@ -140,22 +148,42 @@ tcpip_thread(void *arg)
 
   LWIP_MARK_TCPIP_THREAD();
 
+  tcpip_thread_running = 1;
+
   LOCK_TCPIP_CORE();
   if (tcpip_init_done != NULL) {
     tcpip_init_done(tcpip_init_done_arg);
   }
 
-  while (1) {                          /* MAIN Loop */
+  while (!tcpip_shutdown_requested) {   /* MAIN Loop */
     LWIP_TCPIP_THREAD_ALIVE();
+
     /* wait for a message, timeouts are processed while waiting */
     tcpip_mbox_fetch(&tcpip_mbox, (void **)&msg);
+
+    /*
+     * tcpip_shutdown() uses a NULL message only to wake an idle thread.
+     * Check the shutdown flag before treating NULL as an invalid message.
+     */
+    if (tcpip_shutdown_requested)
+      break;
+
     if (msg == NULL) {
       LWIP_DEBUGF(TCPIP_DEBUG, ("tcpip_thread: invalid message: NULL\n"));
       LWIP_ASSERT("tcpip_thread: invalid message", 0);
       continue;
     }
+
     tcpip_thread_handle_msg(msg);
   }
+
+  /*
+   * The main loop normally holds the core lock between messages.
+   * Never leave a dead title with this mutex locked.
+   */
+  UNLOCK_TCPIP_CORE();
+
+  tcpip_thread_running = 0;
 }
 
 /* Handle a single tcpip_msg
@@ -658,6 +686,9 @@ tcpip_callback_wait(tcpip_callback_fn function, void *ctx)
 void
 tcpip_init(tcpip_init_done_fn initfunc, void *arg)
 {
+  tcpip_shutdown_requested = 0;
+  tcpip_thread_running = 0;
+
   lwip_init();
 
   tcpip_init_done = initfunc;
@@ -671,7 +702,48 @@ tcpip_init(tcpip_init_done_fn initfunc, void *arg)
   }
 #endif /* LWIP_TCPIP_CORE_LOCKING */
 
-  sys_thread_new(TCPIP_THREAD_NAME, tcpip_thread, NULL, TCPIP_THREAD_STACKSIZE, TCPIP_THREAD_PRIO);
+  sys_thread_new(TCPIP_THREAD_NAME,
+                 tcpip_thread,
+                 NULL,
+                 TCPIP_THREAD_STACKSIZE,
+                 TCPIP_THREAD_PRIO);
+}
+
+int
+tcpip_shutdown(void)
+{
+  /*
+   * Set the flag even if the new thread has not run yet. In that race the
+   * thread will start, see the flag before entering its main loop, unlock
+   * the core and immediately return.
+   */
+  tcpip_shutdown_requested = 1;
+
+  if (sys_mbox_valid(&tcpip_mbox)) {
+    /*
+     * Wake a thread blocked in sys_arch_mbox_fetch(). If the queue happens
+     * to be full, tcpip_thread is already runnable and will observe the flag
+     * after processing its current message.
+     */
+    (void)sys_mbox_trypost(
+        &tcpip_mbox,
+        NULL);
+  }
+
+  /*
+   * sys_thread_new currently creates a detached Cafe OS thread, so it
+   * cannot be joined. Wait on the explicit running flag instead.
+   */
+  for (u32_t waited = 0;
+       waited < 100 &&
+       tcpip_thread_running;
+       ++waited) {
+    sys_msleep(1);
+  }
+
+  return tcpip_thread_running
+      ? -1
+      : 0;
 }
 
 /**

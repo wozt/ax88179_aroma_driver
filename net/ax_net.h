@@ -10,6 +10,13 @@ int ax_net_start(Ax88179 *ax);
 int ax_net_poll(void);
 const char *ax_net_address(void);
 void ax_net_stop(void);
+
+/*
+ * APPLICATION_ENDS path: terminate tcpip_thread and abandon the outgoing
+ * title's lwIP state. ax_net_forget() fully resets it in the next title.
+ */
+void ax_net_abandon_title(void);
+
 /* Call once per title, before ax_net_start: the previous title's tcpip
  * thread died with its process and none of that state may be reused. */
 void ax_net_forget(void);

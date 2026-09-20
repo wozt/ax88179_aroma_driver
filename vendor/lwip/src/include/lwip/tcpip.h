@@ -76,6 +76,12 @@ struct tcpip_callback_msg;
 
 void   tcpip_init(tcpip_init_done_fn tcpip_init_done, void *arg);
 
+/*
+ * Aroma/Wii U port extension: terminate tcpip_thread before the outgoing
+ * title reaches real___PPCExit().
+ */
+int    tcpip_shutdown(void);
+
 err_t  tcpip_inpkt(struct pbuf *p, struct netif *inp, netif_input_fn input_fn);
 err_t  tcpip_input(struct pbuf *p, struct netif *inp);
 
