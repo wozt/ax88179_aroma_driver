@@ -3996,7 +3996,11 @@ DECL_FUNCTION(const char *, gai_strerror, int ecode)
 /* ------------------------------------------------------------------ */
 /* registration                                                        */
 
-static PatchedFunctionHandle handles[2 * 24];
+/*
+ * The same nsysnet compatibility layer is now registered for multiple
+ * Wii U processes. Keep plenty of room for every per-process patch.
+ */
+static PatchedFunctionHandle handles[128];
 int handle_count = 0;
 
 static int add_patch(function_replacement_data_t *data, const char *name, int process)
@@ -4018,24 +4022,28 @@ static int add_patch(function_replacement_data_t *data, const char *name, int pr
 }
 
 /*
- * The game process only.
+ * Process coverage.
  *
- * The Wii U Menu is excluded because it mixes patched exports with
- * nsysnet internals we cannot cover (async DNS on system fds, NSSL), for
- * no benefit -- menu traffic can stay on the console's own network.
+ * GAME is the extensively validated path.
  *
- * The Aroma root process is excluded because it is not ours to take
- * over. This module runs inside it during boot, and so do Aroma's own
- * modules with their sockets already open. Patching it once cost the
- * console its boot: the log died the instant sendto was replaced and the
- * environment never reached its menu. Homebrew launched from Aroma runs
- * as the game process anyway, which is the case this exists for.
+ * Wii U Menu is the first system process being enabled. Ownership is
+ * deliberately conservative: descriptors that were not created by this
+ * shim remain native and are passed directly to nsysnet.
+ *
+ * ROOT_RPX remains excluded. Aroma and other resident modules may already
+ * own sockets there before this shim becomes active.
  */
-#define SHIM_PATCH(name)                                                          \
+#define SHIM_PATCH_PROCESS(name, process)                                         \
     do {                                                                          \
         function_replacement_data_t d = REPLACE_FUNCTION_FOR_PROCESS(             \
-            name, LIBRARY_NSYSNET, name, FP_TARGET_PROCESS_GAME);                 \
-        if (add_patch(&d, #name, FP_TARGET_PROCESS_GAME) < 0) goto fail;           \
+            name, LIBRARY_NSYSNET, name, process);                                \
+        if (add_patch(&d, #name, process) < 0) goto fail;                         \
+    } while (0)
+
+#define SHIM_PATCH(name)                                                          \
+    do {                                                                          \
+        SHIM_PATCH_PROCESS(name, FP_TARGET_PROCESS_GAME);                         \
+        SHIM_PATCH_PROCESS(name, FP_TARGET_PROCESS_WII_U_MENU);                   \
     } while (0)
 
 static int installed;

@@ -602,19 +602,8 @@ Prefer counters, deferred traces and worker-side logging.
 
 # Remaining roadmap
 
-## 1. RX performance
 
-Find the remaining bottleneck during the ~147 Mbit/s burst test.
-
-Areas to investigate:
-
-* UHS completion cadence;
-* number of outstanding RX slots;
-* AX88179 aggregation/FIFO behavior;
-* worker scheduling;
-* time between DMA completion and slot rearm.
-
-## 2. DHCP lifecycle
+## 1. DHCP lifecycle
 
 Validate a genuine:
 
@@ -624,7 +613,7 @@ BOUND -> RENEWING -> REBINDING
 
 cycle on real hardware.
 
-## 3. System process coverage
+## 2. System process coverage
 
 Expand beyond:
 
@@ -641,7 +630,7 @@ HOME Menu / eShop / Download Manager
 root/system processes
 ```
 
-## 4. System network state
+## 3. System network state
 
 Eventually expose the AX interface through the higher-level Wii U network configuration/state APIs so the system can report:
 

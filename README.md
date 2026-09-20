@@ -65,7 +65,6 @@ The project provides:
 * Root/system process support
 * Wi-Fi-free system operation
 * DHCP renew/rebind validation
-* Maximum-rate RX burst parity
 * Wider game compatibility
 
 ---
