@@ -51,6 +51,7 @@ The project provides:
 * Wii U Menu + GAME FunctionPatcher coverage
 * Repeated Menu/game title transitions
 * FTPiiU native-listener handoff to AX
+* Wiiload listener handoff to AX on TCP port 4299
 * USB hot-unplug/replug recovery
 * Ethernet link loss/recovery
 * DHCP recovery after interface recreation
@@ -330,6 +331,7 @@ dns=ax
 route=ax
 nssl=bridge
 ftp_handoff=on
+wiiload_handoff=on
 ```
 
 ### DHCP
@@ -409,6 +411,34 @@ ftp_handoff=off
 ```
 
 to keep the existing native listener during diagnostics.
+
+### Wiiload handoff
+
+```ini
+wiiload_handoff=on
+```
+The Wiiload Aroma plugin may already be blocked in a native accept() on TCP port 4299 before AX becomes ready.
+
+When AX becomes available, the driver identifies the native Wiiload listener, marks it for restart and calls shutdown() to wake the blocked accept().
+
+Wiiload then closes its own listener and recreates:
+
+socket()
+bind()
+listen()
+accept()
+
+through the active AX shim.
+
+The recreated Wiiload server is therefore reachable through:
+
+AX88179_IP:4299
+
+For the current test setup:
+
+192.168.2.190:4299
+
+This handoff has been validated on real hardware.
 
 ### Debugging
 
@@ -673,6 +703,7 @@ dns=ax
 route=ax
 nssl=bridge
 ftp_handoff=on
+wiiload_handoff=on
 ```
 
 ---

@@ -45,6 +45,7 @@ For installation, configuration and general project information, see [README.md]
 * Stable Menu -> game -> Menu transitions
 * Per-title AX/lwIP/UHS cleanup and recreation
 * FTPiiU native-listener handoff to AX
+* Wiiload native-listener handoff to AX
 * USB hot-unplug / reconnect
 * Ethernet link loss / restoration
 * DHCP recovery after interface recreation
@@ -286,6 +287,7 @@ dns=ax
 route=ax
 nssl=bridge
 ftp_handoff=on
+wiiload_handoff=on
 ```
 
 The network worker is stopped at:
@@ -626,6 +628,57 @@ ftp_handoff=on
 
 during Menu/game transition testing.
 
+# Wiiload handoff
+
+The Aroma Wiiload plugin starts a TCP server on:
+
+```text
+TCP 4299
+
+Like FTPiiU, this listener may be created before the AX88179 network stack is ready.
+
+Unlike FTPiiU, Wiiload does not wait for connections through select(). Its receiver thread blocks directly in:
+
+accept()
+
+The driver therefore uses a different handoff mechanism.
+
+Once AX is ready it:
+
+finds the native TCP :4299 listener
+        |
+        v
+marks the fd for Wiiload restart
+        |
+        v
+shutdown(native listener)
+        |
+        v
+blocked accept() wakes with an error
+        |
+        v
+Wiiload cleanupSocket()
+        |
+        v
+Wiiload recreates socket/bind/listen
+        |
+        v
+new listener is created through AX/lwIP
+
+Wiiload owns the descriptor and performs the final close itself.
+
+Port 4299 was previously deliberately reserved for the native Wii U stack. That exception was removed so the recreated listener can be owned by AX/lwIP.
+
+Validated on real hardware:
+
+192.168.2.190:4299
+
+with Wiiload successfully transferring and launching homebrew through the AX88179 interface.
+
+Configuration:
+
+wiiload_handoff=on
+```
 ---
 
 # Real-game validation
