@@ -91,6 +91,13 @@ static void load_config(void)
         else if (strstr(b, "ftp_handoff=off"))
             config_ftp_handoff = 0;
 
+        if (strstr(b, "wiiload_proxy=on") ||
+            strstr(b, "wiiload_handoff=on"))
+            config_wiiload_proxy = 1;
+        else if (strstr(b, "wiiload_proxy=off") ||
+                 strstr(b, "wiiload_handoff=off"))
+            config_wiiload_proxy = 0;
+
         int level;
         if (sscanf(b, "shim_trace=%d", &level) == 1) {
             if (level < 0) level = 0;
@@ -332,13 +339,14 @@ static int run_network(int argc, const char **argv)
     nsysnet_shim_set_force_native(config_force_native);
     nsysnet_shim_set_nssl_bridge(config_nssl_bridge);
     ax_net_set_session_lease_mode(config_keep_first);
-    AX_LOG("config dhcp=%s trace=%d dns=%s route=%s nssl=%s ftp_handoff=%s",
+    AX_LOG("config dhcp=%s trace=%d dns=%s route=%s nssl=%s ftp_handoff=%s wiiload_proxy=%s",
            config_keep_first ? "keep_first" : "always",
            config_shim_trace,
            config_system_dns ? "system" : "ax",
            config_force_native ? "native" : "ax",
            config_nssl_bridge ? "bridge" : "native",
-           config_ftp_handoff ? "on" : "off");
+           config_ftp_handoff ? "on" : "off",
+           config_wiiload_proxy ? "on" : "off");
 
     ax_net_forget();
 
