@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.60");
+WUMS_MODULE_VERSION("0.2.61-wiiload-handoff");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 WUMS_USE_WUT_DEVOPTAB();
@@ -40,6 +40,7 @@ static int config_system_dns = 0;
 static int config_force_native = 0;
 static int config_nssl_bridge = 0;
 static int config_ftp_handoff = 1;
+static int config_wiiload_handoff = 1;
 
 static void load_config(void)
 {
@@ -89,6 +90,11 @@ static void load_config(void)
             config_ftp_handoff = 1;
         else if (strstr(b, "ftp_handoff=off"))
             config_ftp_handoff = 0;
+
+        if (strstr(b, "wiiload_handoff=on"))
+            config_wiiload_handoff = 1;
+        else if (strstr(b, "wiiload_handoff=off"))
+            config_wiiload_handoff = 0;
 
         int level;
         if (sscanf(b, "shim_trace=%d", &level) == 1) {
@@ -444,6 +450,26 @@ static int run_network(int argc, const char **argv)
             }
         } else {
             AX_LOG("FTP handoff disabled by config");
+        }
+
+        /*
+         * Wiiload may already be blocked in a native accept() on :4299.
+         * Wake that listener and let the plugin recreate it through AX.
+         */
+        if (config_wiiload_handoff) {
+            int wiiload_handoff =
+                nsysnet_shim_request_wiiload_handoff();
+
+            if (wiiload_handoff > 0) {
+                AX_LOG(
+                    "Wiiload native listener handoff requested fd_count=%d",
+                    wiiload_handoff);
+            } else {
+                AX_LOG(
+                    "Wiiload handoff enabled, no native listener found");
+            }
+        } else {
+            AX_LOG("Wiiload handoff disabled by config");
         }
     } else {
         AX_LOG("FAILED to install shim hooks");

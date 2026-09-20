@@ -11,6 +11,7 @@ void nsysnet_shim_set_nssl_bridge(int enabled);
 int nsysnet_shim_take_ax_activity(void);
 int nsysnet_shim_install(void);
 int nsysnet_shim_request_ftp_handoff(void);
+int nsysnet_shim_request_wiiload_handoff(void);
 void nsysnet_shim_begin_title(void);
 void nsysnet_shim_quiesce(void);
 void nsysnet_shim_drain_owned_sockets(void);
