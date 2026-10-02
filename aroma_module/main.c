@@ -23,7 +23,7 @@
 
 WUMS_MODULE_EXPORT_NAME("homebrew_ax88179");
 WUMS_MODULE_AUTHOR("wozt");
-WUMS_MODULE_VERSION("0.2.62-wiiload-proxy");
+WUMS_MODULE_VERSION("0.2.63-ftp-retry");
 WUMS_MODULE_DESCRIPTION("AX88179 usermode Ethernet, DHCP, and nsysnet shim at boot");
 
 WUMS_USE_WUT_DEVOPTAB();
@@ -429,6 +429,17 @@ static int run_network(int argc, const char **argv)
         goto cleanup;
     }
 
+    /*
+     * FTPiiU is recreated for every title and gets its bind address from
+     * nn::ac. It may therefore create its native/Wi-Fi :21 listener a little
+     * after AX/shim becomes ready.
+     *
+     * Keep a short non-blocking retry window instead of checking only once.
+     */
+    int ftp_handoff_pending = 0;
+    OSTime ftp_handoff_next = 0;
+    OSTime ftp_handoff_deadline = 0;
+
     /* Install nsysnet shim hooks — ONLY if SHIM is enabled */
 #if !AX_DISABLE_SHIM
     if (nsysnet_shim_install() == 0) {
@@ -449,7 +460,21 @@ static int run_network(int argc, const char **argv)
                     "FTP native listener handoff requested fd_count=%d",
                     ftp_handoff);
             } else {
-                AX_LOG("FTP handoff enabled, no native listener found");
+                /*
+                 * FTPiiU may still be inside its APPLICATION_START setup.
+                 * Retry from the normal AX polling loop so networking keeps
+                 * running while we wait.
+                 */
+                OSTime now = OSGetTime();
+
+                ftp_handoff_pending = 1;
+                ftp_handoff_next =
+                    now + OSMillisecondsToTicks(250);
+                ftp_handoff_deadline =
+                    now + OSMillisecondsToTicks(15000);
+
+                AX_LOG(
+                    "FTP handoff waiting for native listener");
             }
         } else {
             AX_LOG("FTP handoff disabled by config");
@@ -494,11 +519,59 @@ static int run_network(int argc, const char **argv)
             if (config_wiiload_proxy)
                 nsysnet_shim_wiiload_proxy_start();
 
+#if !AX_DISABLE_SHIM
+            if (config_ftp_handoff) {
+                OSTime now = OSGetTime();
+
+                ftp_handoff_pending = 1;
+                ftp_handoff_next = now;
+                ftp_handoff_deadline =
+                    now + OSMillisecondsToTicks(15000);
+
+                AX_LOG(
+                    "FTP handoff retry rearmed after AX recovery");
+            }
+#endif
+
             continue;
         }
 
         if (config_wiiload_proxy)
             nsysnet_shim_wiiload_proxy_poll();
+
+#if !AX_DISABLE_SHIM
+        /*
+         * FTPiiU binds to nn::ac's native/Wi-Fi address every time it starts.
+         * If its listener appeared after our initial handoff check, catch it
+         * here and make FTPiiU recreate the listener through AX.
+         */
+        if (config_ftp_handoff &&
+            ftp_handoff_pending) {
+
+            OSTime now = OSGetTime();
+
+            if (now >= ftp_handoff_next) {
+                int ftp_handoff =
+                    nsysnet_shim_request_ftp_handoff();
+
+                if (ftp_handoff > 0) {
+                    AX_LOG(
+                        "FTP delayed native listener handoff requested fd_count=%d",
+                        ftp_handoff);
+
+                    ftp_handoff_pending = 0;
+                } else if (now >= ftp_handoff_deadline) {
+                    AX_LOG(
+                        "FTP handoff retry window ended");
+
+                    ftp_handoff_pending = 0;
+                } else {
+                    ftp_handoff_next =
+                        now + OSMillisecondsToTicks(250);
+                }
+            }
+        }
+#endif
 
         const char *ip = ax_net_address();
 

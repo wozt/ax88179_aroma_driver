@@ -102,3 +102,11 @@ Ethernet use; 192.168.2.124 indicates native Wi-Fi.
 
 Host helper regression tests: `python3 ../tests/test_shim_routing.py`.
 The errno conversion follows [WUT’s native error map](https://github.com/devkitPro/wut/blob/master/libraries/wutsocket/wut_socket_common.c).
+
+## License
+
+AX88179 Aroma Driver is licensed under the GNU General Public License v3.0.
+
+See [LICENSE](LICENSE) for details.
+
+Vendored third-party components remain subject to their respective licenses.
