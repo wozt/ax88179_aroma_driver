@@ -843,6 +843,8 @@ Use it at your own risk.
 
 ## License
 
-No project license has been selected yet.
+AX88179 Aroma Driver is licensed under the **GNU General Public License v3.0**.
 
-The licensing requirements of the project code and vendored dependencies should be documented before distributing official releases or accepting external contributions.
+See [LICENSE](LICENSE) for the full license text.
+
+Vendored dependencies retain their respective licenses. In particular, lwIP is distributed under its BSD-style license.
